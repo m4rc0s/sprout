@@ -10,7 +10,9 @@ auth_file="$config_dir/auth.toml"
 usage() {
   cat >&2 <<'HELP'
 Usage:
-  sprout plant <REPO_URL_OR_PATH> [DEST_DIR] [options]
+  sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
+  sprout plant [SPEC_DOC] [DEST_DIR] [options]
+  sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
   sprout init
   sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
@@ -18,7 +20,7 @@ Usage:
   sprout <type> (--issue <ISSUE-KEY> | --feature <name>) [options]
 
 Tree Planting & Initialization:
-  sprout plant <URL_OR_PATH> [DIR] [options]   Plant base repository tree from a Git URL/path & checkout branch
+  sprout plant [URL|PATH|SPEC] [DIR] [options] Plant base repo from Git URL, local path, or spec doc (.md/.html)
   sprout init                                  Interactive initialization inside an existing base repository
 
 Session Management & Autonomous Watcher:
@@ -36,12 +38,10 @@ Options:
   TEXT                 Optional positional text describing the task/goal (bypasses Jira)
   -c, --context TEXT   Free-form task context (use '-' to read from stdin)
   --context-file FILE  Read task context from a markdown or text file
+  -s, --spec PATH      Path to vision, PRD, or spec document (.md, .html) to bootstrap project from
   -b, --branch BRANCH  Branch to checkout (used with plant; defaults to default branch or #branch in URL)
-  --issue KEY          Issue key (e.g. Jira); fetches details to generate branch slug and .sprout/issue.json
-  --feature NAME       Directory name; auto-derived from context or issue if omitted; lowercased with underscores
-  --slug SLUG          Branch slug; defaults to feature name; lowercased with hyphens converted to underscores
-  --base PATH          Base repository; defaults to current Git repo, then BASE_REPO, then ~/workspace/finance_tool
-  --dest PATH          Full worktree destination; defaults to sibling directory named after feature/key
+  --dest PATH          Destination directory (defaults to repo name or derived project slug)
+  --name NAME          Project display name (defaults to repository name or document title)
   -a, --agent NAME     Agent to launch in Herdr workspace (auto, claude, agy, codex). Default: auto (headroom-first router)
   --model MODEL        Explicit model override (e.g. opus, sonnet, gemini-4-argon, gemini-3.8-flash, gpt-6-luna)
   --effort LEVEL       Explicit reasoning effort override (high, medium, low)
@@ -55,9 +55,19 @@ Options:
 and defaults under shared Git metadata, and tracker credentials in $HOME/.sprout/auth.toml.
 
 Examples:
+  # Plant a brand new project from a specification document:
+  sprout plant vision.md
+  sprout plant specs/prd.html ~/workspace/meu_app
+
+  # Plant from a remote repository:
   sprout plant git@github.com:m4rc0s/sprout.git
   sprout plant https://github.com/m4rc0s/sprout.git --branch develop
-  sprout plant /path/to/existing/repo ~/workspace/novo_repo
+
+  # Plant an existing repository and seed it with a spec document:
+  sprout plant git@github.com:org/repo.git --spec vision.md
+  sprout plant --spec vision.md
+
+  # Sprout worktrees:
   sprout feat "Adicionar exportação CSV no relatório de vendas"
   sprout fix "Deadlock no pool de conexões do postgres" --agent agy
   sprout docs "Atualizar guia de onboarding e setup"
@@ -929,14 +939,19 @@ PYINIT
 plant_repository() {
   local source_input=""
   local dest_input=""
+  local spec_input=""
   local branch_override=""
   local name_override=""
   local agent_override="auto"
   local method_override="bmad"
   local no_herdr=false
+  local no_agent=false
 
   while (($#)); do
     case "$1" in
+      -s|--spec)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        spec_input=$2; shift 2 ;;
       -b|--branch)
         (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
         branch_override=$2; shift 2 ;;
@@ -954,35 +969,50 @@ plant_repository() {
         method_override=$2; shift 2 ;;
       --no-herdr)
         no_herdr=true; shift ;;
+      --no-agent)
+        no_agent=true; shift ;;
       -h|--help)
         cat <<'PLANTHelp'
 Usage:
-  sprout plant <REPO_URL_OR_PATH> [DEST_DIR] [options]
+  sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
+  sprout plant [SPEC_DOC] [DEST_DIR] [options]
+  sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
 
-Plant a base repository tree from a Git URL or local path into a clean directory,
-setting up Git tracking, branch checkout, and Sprout configuration deterministically without LLMs.
+Plant a base repository tree from a Git URL, local path, or a product specification
+document (.md, .markdown, .html) deterministically with zero LLMs.
 
 Options:
+  -s, --spec PATH       Path to a product vision, PRD, or spec document (.md, .html)
   -b, --branch BRANCH   Branch to checkout after cloning (e.g. main, develop, feat/xyz)
-  --dest PATH           Destination directory (defaults to repo name in current working dir)
-  --name NAME           Project display name (defaults to repository name)
+  --dest PATH           Destination directory (defaults to repo name or derived project slug)
+  --name NAME           Project display name (defaults to repository name or document title)
   -a, --agent NAME      Default agent (auto, claude, agy, codex). Default: auto
   -m, --method NAME     Default methodology (bmad, scpe, none). Default: bmad
+  --no-agent            Do not launch agent session in Herdr
   --no-herdr            Do not create or focus workspace in Herdr
   -h, --help            Show this help
 
 Examples:
+  # Plant a brand new project from a Markdown specification:
+  sprout plant vision.md
+  sprout plant specs/prd.html ~/workspace/meu_app
+
+  # Plant from a remote repository:
   sprout plant git@github.com:m4rc0s/sprout.git
   sprout plant https://github.com/m4rc0s/sprout.git --branch develop
-  sprout plant /path/to/existing/repo ~/workspace/novo_repo
-  sprout plant git@github.com:org/repo.git#feat/v2 .
+
+  # Plant an existing repository and seed it with a spec document:
+  sprout plant git@github.com:org/repo.git --spec vision.md
+  sprout plant --spec vision.md (inside an existing repo)
 PLANTHelp
         exit 0
         ;;
       -*)
         printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
       *)
-        if [[ -z "$source_input" ]]; then
+        if [[ -z "$spec_input" && ( "$1" =~ \.(md|markdown|html|htm)$ || ( -f "$1" && ! -d "$1" ) ) ]]; then
+          spec_input=$1
+        elif [[ -z "$source_input" && -z "$spec_input" ]]; then
           source_input=$1
         elif [[ -z "$dest_input" ]]; then
           dest_input=$1
@@ -994,14 +1024,111 @@ PLANTHelp
     esac
   done
 
-  [[ -n "$source_input" ]] || {
-    printf 'Error: Provide a repository URL or local Git path.\nRun sprout plant --help for usage.\n' >&2
-    exit 1
-  }
+  local spec_file=""
+  local spec_title=""
+  local spec_slug=""
+  local spec_ext=""
 
-  # Parse repository URL/path and embedded branch
-  local parsed_info
-  parsed_info=$(python3 - "$source_input" <<'PYPARSE'
+  if [[ -n "$spec_input" ]]; then
+    if [[ ! -f "$spec_input" ]]; then
+      printf 'Error: Specification document not found: %s\n' "$spec_input" >&2
+      exit 1
+    fi
+    spec_file=$(cd "$(dirname "$spec_input")" && pwd -P)/$(basename "$spec_input")
+
+    # Extract spec title, slug, and format deterministically
+    local spec_info
+    spec_info=$(python3 - "$spec_file" <<'PYSPEC'
+import sys, re, unicodedata
+from html.parser import HTMLParser
+from pathlib import Path
+
+p = Path(sys.argv[1])
+raw = p.read_text(encoding="utf-8", errors="replace")
+ext = p.suffix.lower()
+
+title = ""
+plain_text = ""
+
+if ext in (".html", ".htm"):
+    class Extractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.text_parts = []
+            self.title_parts = []
+            self.h1_parts = []
+            self.in_title = False
+            self.in_h1 = False
+        def handle_starttag(self, tag, attrs):
+            if tag == "title": self.in_title = True
+            elif tag == "h1" and not self.h1_parts: self.in_h1 = True
+        def handle_endtag(self, tag):
+            if tag == "title": self.in_title = False
+            elif tag == "h1": self.in_h1 = False
+        def handle_data(self, data):
+            if self.in_title: self.title_parts.append(data)
+            if self.in_h1: self.h1_parts.append(data)
+            self.text_parts.append(data)
+    
+    parser = Extractor()
+    parser.feed(raw)
+    title = "".join(parser.h1_parts).strip() or "".join(parser.title_parts).strip()
+    plain_text = " ".join("".join(parser.text_parts).split())
+else:
+    for line in raw.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("# ") and not title:
+            title = line_s.lstrip("# ").strip()
+            break
+        elif re.match(r"^title\s*[:=]\s*['\"]?(.*?)['\"]?$", line_s, re.I) and not title:
+            title = re.match(r"^title\s*[:=]\s*['\"]?(.*?)['\"]?$", line_s, re.I).group(1).strip()
+            break
+    plain_text = raw
+    if not title:
+        for line in raw.splitlines():
+            if line.strip():
+                title = line.strip()[:60]
+                break
+
+title = title or p.stem.replace("_", " ").title()
+
+norm = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+norm = re.sub(r"[^\w\s-]", "", norm).strip().lower()
+words = [re.sub(r"[-\s]+", "", w) for w in norm.split() if w]
+stop_words = {"de", "do", "da", "dos", "das", "no", "na", "nos", "nas", "em", "para", "com", "por", "the", "a", "an", "of", "in", "on", "for", "with", "to", "and", "e"}
+res = []
+cur_len = 0
+for w in words:
+    add_len = len(w) + (1 if res else 0)
+    if cur_len + add_len > 32 and res:
+        break
+    res.append(w)
+    cur_len += add_len
+while len(res) > 1 and res[-1] in stop_words:
+    res.pop()
+slug = "_".join(res) or p.stem.lower()
+
+print(f"{title}\t{slug}\t{ext}")
+PYSPEC
+    )
+    spec_title=$(awk -F'\t' '{print $1}' <<< "$spec_info")
+    spec_slug=$(awk -F'\t' '{print $2}' <<< "$spec_info")
+    spec_ext=$(awk -F'\t' '{print $3}' <<< "$spec_info")
+  fi
+
+  # Check if we are inside an existing Git repo or need a Greenfield project
+  local current_repo
+  current_repo=$(git rev-parse --show-toplevel 2>/dev/null || true)
+
+  local is_greenfield=false
+  local repo_url=""
+  local repo_name=""
+  local branch_from_url=""
+  local gh_repo=""
+
+  if [[ -n "$source_input" ]]; then
+    local parsed_info
+    parsed_info=$(python3 - "$source_input" <<'PYPARSE'
 import sys, re
 
 raw = sys.argv[1].strip()
@@ -1020,18 +1147,30 @@ if m:
 
 print(f"{raw}\t{name}\t{branch}\t{github_repo}")
 PYPARSE
-  )
+    )
+    repo_url=$(awk -F'\t' '{print $1}' <<< "$parsed_info")
+    repo_name=$(awk -F'\t' '{print $2}' <<< "$parsed_info")
+    branch_from_url=$(awk -F'\t' '{print $3}' <<< "$parsed_info")
+    gh_repo=$(awk -F'\t' '{print $4}' <<< "$parsed_info")
+  elif [[ -n "$spec_file" ]]; then
+    if [[ -n "$current_repo" && -z "$dest_input" ]]; then
+      repo_url="$current_repo"
+      repo_name="$(basename "$current_repo")"
+    else
+      is_greenfield=true
+      repo_name="$spec_slug"
+    fi
+  elif [[ -n "$current_repo" ]]; then
+    repo_url="$current_repo"
+    repo_name="$(basename "$current_repo")"
+  else
+    printf 'Error: Provide a repository URL, Git path, or specification document (.md, .html).\nRun sprout plant --help for usage.\n' >&2
+    exit 1
+  fi
 
-  local repo_url repo_name branch_from_url gh_repo
-  repo_url=$(awk -F'\t' '{print $1}' <<< "$parsed_info")
-  repo_name=$(awk -F'\t' '{print $2}' <<< "$parsed_info")
-  branch_from_url=$(awk -F'\t' '{print $3}' <<< "$parsed_info")
-  gh_repo=$(awk -F'\t' '{print $4}' <<< "$parsed_info")
-
+  local project_name="${name_override:-${spec_title:-$repo_name}}"
   local target_branch="${branch_override:-$branch_from_url}"
-  local project_name="${name_override:-$repo_name}"
 
-  # Determine destination directory
   local target_dir
   if [[ -n "$dest_input" ]]; then
     if [[ "$dest_input" == "." ]]; then
@@ -1045,28 +1184,46 @@ PYPARSE
     target_dir="$(pwd -P)/$repo_name"
   fi
 
-  printf '\n🌱 [Sprout Plant] Planting base repository tree...\n'
-  printf '   Source:        %s\n' "$repo_url"
+  printf '\n🌱 [Sprout Plant] Planting project tree...\n'
+  if [[ -n "$spec_file" ]]; then
+    printf '   Specification: %s\n' "$spec_file"
+  fi
+  if [[ -n "$repo_url" ]]; then
+    printf '   Source Repo:   %s\n' "$repo_url"
+  fi
   printf '   Destination:   %s\n' "$target_dir"
   [[ -z "$target_branch" ]] || printf '   Target Branch: %s\n' "$target_branch"
 
-  # 1. Clone repository if not already cloned
-  if [[ -d "$target_dir/.git" ]]; then
-    printf '   Note: Directory %s is already a Git repository.\n' "$target_dir"
-  elif [[ -d "$target_dir" && $(ls -A "$target_dir" 2>/dev/null) ]]; then
-    printf 'Error: Destination directory %s exists and is not empty.\n' "$target_dir" >&2
-    exit 1
-  else
-    mkdir -p "$(dirname "$target_dir")"
-    if ! git clone "$repo_url" "$target_dir"; then
-      printf 'Error: Failed to clone repository from %s\n' "$repo_url" >&2
+  # 1. Establish Git repository
+  if [[ "$is_greenfield" == "true" ]]; then
+    if [[ -d "$target_dir/.git" ]]; then
+      printf '   Note: Directory %s is already a Git repository.\n' "$target_dir"
+    elif [[ -d "$target_dir" && $(ls -A "$target_dir" 2>/dev/null) ]]; then
+      printf 'Error: Destination directory %s exists and is not empty.\n' "$target_dir" >&2
       exit 1
+    else
+      mkdir -p "$target_dir"
+      git -C "$target_dir" init -b "${target_branch:-main}" >/dev/null 2>&1
+      printf '   Git Init:      Initialized clean repository on branch %s\n' "${target_branch:-main}"
+    fi
+  else
+    if [[ -d "$target_dir/.git" ]]; then
+      printf '   Note: Directory %s is already a Git repository.\n' "$target_dir"
+    elif [[ -d "$target_dir" && $(ls -A "$target_dir" 2>/dev/null) ]]; then
+      printf 'Error: Destination directory %s exists and is not empty.\n' "$target_dir" >&2
+      exit 1
+    else
+      mkdir -p "$(dirname "$target_dir")"
+      if ! git clone "$repo_url" "$target_dir"; then
+        printf 'Error: Failed to clone repository from %s\n' "$repo_url" >&2
+        exit 1
+      fi
     fi
   fi
 
   # 2. Checkout target branch if specified
   local active_branch
-  if [[ -n "$target_branch" ]]; then
+  if [[ -n "$target_branch" && "$is_greenfield" != "true" ]]; then
     if git -C "$target_dir" rev-parse --verify "refs/heads/$target_branch" >/dev/null 2>&1; then
       git -C "$target_dir" checkout "$target_branch" >/dev/null 2>&1 || true
     elif git -C "$target_dir" rev-parse --verify "refs/remotes/origin/$target_branch" >/dev/null 2>&1; then
@@ -1075,7 +1232,9 @@ PYPARSE
       git -C "$target_dir" checkout -b "$target_branch" >/dev/null 2>&1 || true
     fi
   fi
-  active_branch=$(git -C "$target_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+  active_branch=$(git -C "$target_dir" branch --show-current 2>/dev/null || echo "main")
+  active_branch=$(tail -n 1 <<< "$active_branch")
+  [[ -n "$active_branch" ]] || active_branch="main"
 
   # 3. Resolve metadata
   local resolved canonical_root common_dir
@@ -1086,7 +1245,75 @@ PYPARSE
   canonical_root=$(sed -n '1p' <<< "$resolved")
   common_dir=$(sed -n '2p' <<< "$resolved")
 
-  # 4. Initialize Sprout configuration (100% deterministic, zero LLMs)
+  # 4. Ingest specification document if provided
+  mkdir -p "$target_dir/.sprout"
+  ln -sfn .sprout "$target_dir/.jdw" 2>/dev/null || true
+
+  if [[ -n "$spec_file" ]]; then
+    cp "$spec_file" "$target_dir/.sprout/spec${spec_ext}"
+    printf '   Spec Ingest:   Saved to .sprout/spec%s\n' "$spec_ext"
+
+    if [[ ! -f "$target_dir/README.md" ]]; then
+      cat > "$target_dir/README.md" <<EOF
+# ${project_name}
+
+Project planted by Sprout from \`${spec_file##*/}\`.
+
+## Vision & Overview
+See \`.sprout/spec${spec_ext}\` for detailed requirements and specifications.
+EOF
+      printf '   Created:       README.md\n'
+    fi
+
+    if [[ ! -f "$target_dir/product_vision.md" ]]; then
+      if [[ "$spec_ext" =~ \.(md|markdown)$ ]]; then
+        cp "$spec_file" "$target_dir/product_vision.md"
+        printf '   Created:       product_vision.md (SCPE/BMad standard)\n'
+      fi
+    fi
+
+    python3 - "$target_dir/.sprout" "$project_name" "$spec_file" "$spec_ext" <<'PYNORM_SPEC'
+import json, sys, os
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+project_name = sys.argv[2]
+spec_path = Path(sys.argv[3])
+spec_ext = sys.argv[4]
+
+user_name = os.getenv("USER") or "developer"
+raw_content = spec_path.read_text(encoding="utf-8", errors="replace")
+
+issue_model = {
+    "key": "INIT",
+    "summary": f"Bootstrap: {project_name}",
+    "status": "In Progress",
+    "type": "Initiative",
+    "priority": "High",
+    "assignee": user_name,
+    "description": f"Initial product specification ingested from {spec_path.name}.\n\n{raw_content[:4000]}",
+    "source": "spec",
+    "spec_file": spec_path.name,
+    "url": ""
+}
+
+with open(out_dir / "issue.json", "w", encoding="utf-8") as f:
+    json.dump(issue_model, f, indent=2, ensure_ascii=False)
+
+with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
+    f.write(f"# [INIT] {project_name}\n\n")
+    f.write(f"- **Tipo:** Initiative / Bootstrap\n")
+    f.write(f"- **Prioridade:** High\n")
+    f.write(f"- **Origem:** Specification Document (`{spec_path.name}`)\n")
+    f.write(f"- **Responsável:** {user_name}\n\n")
+    f.write(f"## Especificação e Definições Básicas\n\n")
+    f.write(raw_content)
+    f.write("\n")
+PYNORM_SPEC
+    printf '   Context:       Saved to .sprout/issue.json and .sprout/issue.md\n'
+  fi
+
+  # 5. Initialize Sprout configuration (100% deterministic, zero LLMs)
   local sprout_dir="$common_dir/sprout"
   mkdir -p "$sprout_dir"
   local config_file="$sprout_dir/config.toml"
@@ -1120,7 +1347,7 @@ EOF
     printf '   Config:        Existing %s found\n' "$config_file"
   fi
 
-  # 5. Initialize agents_status.json
+  # 6. Initialize agents_status.json
   local status_file="$sprout_dir/agents_status.json"
   if [[ ! -f "$status_file" ]]; then
     local global_status="$HOME/.sprout/agents_status.json"
@@ -1137,11 +1364,74 @@ EOF
     fi
   fi
 
-  # 6. Herdr integration
+  # 7. Initial commit if brand new repo
+  if [[ "$is_greenfield" == "true" ]]; then
+    git -C "$target_dir" add . >/dev/null 2>&1
+    git -C "$target_dir" commit -m "chore: plant initial project structure from spec" >/dev/null 2>&1 || true
+    printf '   Initial Commit:Created initial commit on %s\n' "$active_branch"
+  fi
+
+  # 8. Herdr integration
   if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1; then
     if herdr status client >/dev/null 2>&1; then
-      printf '   Herdr:         Workspace %s registered\n' "$project_name"
-      herdr workspace create --cwd "$target_dir" --label "$project_name" --focus >/dev/null 2>&1 || true
+      printf '   Herdr:         Creating workspace %s...\n' "$project_name"
+      local ws_create_json pane_id safe_agent_name
+      ws_create_json=$(herdr workspace create --cwd "$target_dir" --label "$project_name" --focus 2>/dev/null) || true
+      pane_id=$(jq -r '.result.root_pane.pane_id // empty' <<< "$ws_create_json" 2>/dev/null || true)
+
+      if [[ "$no_agent" != "true" && -n "$pane_id" ]]; then
+        safe_agent_name=$(printf 'agent-%s' "$project_name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
+        
+        local chosen_agent="$agent_override"
+        if [[ "$chosen_agent" == "auto" ]]; then
+          chosen_agent=$(python3 - "$status_file" <<'PYROUTE'
+import sys, json
+from pathlib import Path
+
+status_file = Path(sys.argv[1])
+agents = ["claude", "agy", "codex"]
+agent_scores = {a: 100 for a in agents}
+if status_file.exists():
+    try:
+        data = json.loads(status_file.read_text())
+        for a in agents:
+            sess = data.get(a, {}).get("active_sessions", 0)
+            agent_scores[a] -= sess * 20
+    except Exception:
+        pass
+best = sorted(agents, key=lambda a: -agent_scores[a])[0]
+print(best)
+PYROUTE
+          )
+        fi
+
+        local agent_model=""
+        case "$chosen_agent" in
+          agy) agent_model="gemini-4-argon" ;;
+          claude) agent_model="opus" ;;
+          codex) agent_model="gpt-6-luna" ;;
+        esac
+
+        printf '   Herdr Agent:   Starting %s (%s, model: %s) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$pane_id"
+        local agent_extra_args=()
+        if [[ "$chosen_agent" == "agy" ]]; then
+          agent_extra_args=(-- --new-project --project "$project_name" --model "$agent_model" --effort high)
+        elif [[ "$chosen_agent" == "claude" ]]; then
+          agent_extra_args=(-- --model "$agent_model" --effort high)
+        elif [[ "$chosen_agent" == "codex" ]]; then
+          agent_extra_args=(-- --model "$agent_model")
+        fi
+
+        if herdr agent start "$safe_agent_name" --kind "$chosen_agent" --pane "$pane_id" "${agent_extra_args[@]}" 2>/dev/null; then
+          local initial_prompt=""
+          if [[ -n "$spec_file" ]]; then
+            initial_prompt="BMad, o projeto $project_name foi plantado a partir do documento de especificação salvo em .sprout/spec$spec_ext. A visão geral está em .sprout/issue.md. Analise as definições do produto e inicie o planejamento de arquitetura e primeira iniciativa."
+          else
+            initial_prompt="BMad, repositório base $project_name plantado e pronto. Inicie a análise para a primeira feature/iniciativa."
+          fi
+          herdr agent prompt "$safe_agent_name" "$initial_prompt" >/dev/null 2>&1 || true
+        fi
+      fi
     fi
   fi
 
@@ -1150,6 +1440,9 @@ EOF
   printf '   Active Branch: %s\n' "$active_branch"
   printf '   Default Agent: %s\n' "$agent_override"
   printf '   Default Method:%s\n' "$method_override"
+  if [[ -n "$spec_file" ]]; then
+    printf '   Spec Context:  .sprout/spec%s (and .sprout/issue.md)\n' "$spec_ext"
+  fi
   printf '\nPara começar a brotar novas tarefas (sprout worktrees):\n'
   printf '   cd %q\n' "$target_dir"
   printf '   sprout feat "Sua primeira feature"\n'

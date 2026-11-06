@@ -36,16 +36,22 @@ cp bin/sprout ~/.local/bin/sprout
 ### 2. Plant the Tree or Initialize an Existing Repo
 
 **Option A: Plant from scratch in any clean directory (`sprout plant`)**
-If starting from an arbitrary directory without a pre-existing workspace, use `sprout plant` to clone, checkout the desired branch, and configure Sprout 100% deterministically with zero LLMs:
+If starting from an arbitrary directory without a pre-existing workspace, use `sprout plant` to clone from a Git repo OR bootstrap a brand new project from a specification document (Markdown/HTML) 100% deterministically with zero LLMs:
 ```bash
-# Plant repository tree into ./finance_tool on default branch
-sprout plant git@github.com:my-org/finance_tool.git
+# 1. Bootstrap a brand new project from a Markdown product vision or PRD:
+sprout plant vision.md
+sprout plant specs/billing_prd.html ~/workspace/billing_service
 
-# Plant and checkout a specific branch
+# 2. Plant from a remote repository:
+sprout plant git@github.com:my-org/finance_tool.git
 sprout plant https://github.com/my-org/finance_tool.git --branch develop
 
-# Plant into a custom destination directory
+# 3. Plant into a custom destination directory:
 sprout plant /path/to/existing/repo ~/workspace/finance_tool
+
+# 4. Seed an existing repository with a specification document:
+sprout plant git@github.com:my-org/finance_tool.git --spec specs/v2.md
+sprout plant --spec vision.md  # inside current repo
 ```
 
 **Option B: Initialize inside an existing local repository (`sprout init`)**
