@@ -195,7 +195,7 @@ def get_watcher_pid():
 def find_agent_for_worktree(target_root, pane_ovr="", agent_ovr=""):
     try:
         out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
-        agents = json.loads(out).get("result", {}).get("agents", [])
+        agents = (json.loads(out).get("result") or {}).get("agents") or []
         for ag in agents:
             if pane_ovr and ag.get("pane_id") == pane_ovr:
                 return ag
@@ -214,7 +214,7 @@ def estimate_context_metrics(ag_info):
         return 0, 0, None
     pane_id = ag_info.get("pane_id", "")
     agent_kind = ag_info.get("agent", "")
-    sess_id = ag_info.get("agent_session", {}).get("value", "")
+    sess_id = (ag_info.get("agent_session") or {}).get("value") or ""
 
     size_bytes = 0
     transcript_path = None
@@ -228,8 +228,8 @@ def estimate_context_metrics(ag_info):
     if pane_id:
         try:
             out = subprocess.check_output(["herdr", "pane", "get", pane_id], stderr=subprocess.DEVNULL)
-            p_data = json.loads(out).get("result", {}).get("pane", {})
-            scroll_lines = p_data.get("scroll", {}).get("max_offset_from_bottom", 0)
+            p_data = (json.loads(out).get("result") or {}).get("pane") or {}
+            scroll_lines = (p_data.get("scroll") or {}).get("max_offset_from_bottom", 0)
         except Exception:
             pass
 
@@ -246,9 +246,9 @@ def terminate_agent_in_pane(pane_id, timeout=3.5):
     while time.time() - start_t < timeout:
         try:
             out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
-            p_info = json.loads(out).get("result", {}).get("process_info", {})
+            p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
             shell_pid = p_info.get("shell_pid")
-            fg_procs = p_info.get("foreground_processes", [])
+            fg_procs = p_info.get("foreground_processes") or []
             non_shell = [p for p in fg_procs if p.get("pid") != shell_pid and p.get("name") not in ("bash", "zsh", "sh", "fish")]
             if not non_shell:
                 return True
@@ -266,9 +266,9 @@ def terminate_agent_in_pane(pane_id, timeout=3.5):
 
     try:
         out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
-        p_info = json.loads(out).get("result", {}).get("process_info", {})
+        p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
         shell_pid = p_info.get("shell_pid")
-        for p in p_info.get("foreground_processes", []):
+        for p in (p_info.get("foreground_processes") or []):
             if p.get("pid") != shell_pid and p.get("name") not in ("bash", "zsh", "sh", "fish"):
                 try:
                     os.kill(p["pid"], signal.SIGKILL)
@@ -297,7 +297,7 @@ if subcmd == "status":
         kind = agent_info.get("agent", "unknown")
         pane_id = agent_info.get("pane_id", "unknown")
         status = agent_info.get("agent_status", "unknown").upper()
-        sess_val = agent_info.get("agent_session", {}).get("value", "—")
+        sess_val = (agent_info.get("agent_session") or {}).get("value") or "—"
         size_kb, scroll_lines, _ = estimate_context_metrics(agent_info)
 
         print(f"Herdr Agent:       {name} (kind: {kind})")
@@ -473,9 +473,9 @@ def terminate_pane(pane_id, timeout=3.5):
     while time.time() - start_t < timeout:
         try:
             out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
-            p_info = json.loads(out).get("result", {}).get("process_info", {})
+            p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
             shell_pid = p_info.get("shell_pid")
-            fg_procs = p_info.get("foreground_processes", [])
+            fg_procs = p_info.get("foreground_processes") or []
             non_shell = [p for p in fg_procs if p.get("pid") != shell_pid and p.get("name") not in ("bash", "zsh", "sh", "fish")]
             if not non_shell:
                 return True
@@ -492,9 +492,9 @@ def terminate_pane(pane_id, timeout=3.5):
         time.sleep(0.3)
     try:
         out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
-        p_info = json.loads(out).get("result", {}).get("process_info", {})
+        p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
         shell_pid = p_info.get("shell_pid")
-        for p in p_info.get("foreground_processes", []):
+        for p in (p_info.get("foreground_processes") or []):
             if p.get("pid") != shell_pid and p.get("name") not in ("bash", "zsh", "sh", "fish"):
                 try:
                     os.kill(p["pid"], signal.SIGKILL)
@@ -515,14 +515,14 @@ cooldowns = {}
 while True:
     try:
         out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
-        agents = json.loads(out).get("result", {}).get("agents", [])
+        agents = (json.loads(out).get("result") or {}).get("agents") or []
         now_ts = time.time()
         for ag in agents:
             pane_id = ag.get("pane_id")
             cwd = ag.get("cwd") or ag.get("foreground_cwd")
             agent_kind = ag.get("agent")
             agent_name = ag.get("name") or f"agent-{Path(cwd).name if cwd else 'session'}"
-            sess_id = ag.get("agent_session", {}).get("value")
+            sess_id = (ag.get("agent_session") or {}).get("value")
 
             if not cwd or not Path(cwd).is_dir():
                 continue
@@ -543,8 +543,8 @@ while True:
             if pane_id:
                 try:
                     p_out = subprocess.check_output(["herdr", "pane", "get", pane_id], stderr=subprocess.DEVNULL)
-                    p_data = json.loads(p_out).get("result", {}).get("pane", {})
-                    scroll_lines = p_data.get("scroll", {}).get("max_offset_from_bottom", 0)
+                    p_data = (json.loads(p_out).get("result") or {}).get("pane") or {}
+                    scroll_lines = (p_data.get("scroll") or {}).get("max_offset_from_bottom", 0)
                 except Exception:
                     pass
 
@@ -704,7 +704,7 @@ if subcmd == "status":
     try:
         out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
         h_data = json.loads(out)
-        for ag in h_data.get("result", {}).get("agents", []):
+        for ag in (h_data.get("result") or {}).get("agents") or []:
             k = ag.get("agent")
             if k:
                 herdr_counts[k] = herdr_counts.get(k, 0) + 1
@@ -1395,7 +1395,7 @@ if status_file.exists():
     try:
         data = json.loads(status_file.read_text())
         for a in agents:
-            sess = data.get(a, {}).get("active_sessions", 0)
+            sess = (data.get(a) or {}).get("active_sessions", 0)
             agent_scores[a] -= sess * 20
     except Exception:
         pass
@@ -1743,7 +1743,7 @@ import json, sys
 try:
     with open(sys.argv[1], "r", encoding="utf-8") as f:
         data = json.load(f)
-    raw = data.get("fields", {}).get("description")
+    raw = (data.get("fields") or {}).get("description")
     def extract_text(node):
         if isinstance(node, dict):
             t = node.get("text", "") if node.get("type") == "text" else ""
@@ -1916,7 +1916,7 @@ herdr_counts = {}
 try:
     out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
     h_data = json.loads(out)
-    for ag in h_data.get("result", {}).get("agents", []):
+    for ag in (h_data.get("result") or {}).get("agents") or []:
         k = ag.get("agent")
         if k:
             herdr_counts[k] = herdr_counts.get(k, 0) + 1
@@ -1979,7 +1979,7 @@ default_models = {
     "agy": {"frontier": "gemini-4-argon", "balanced": "gemini-4-argon", "fast": "gemini-3.8-flash"},
     "codex": {"frontier": "gpt-6-luna", "balanced": "gpt-5.6-terra", "fast": "gpt-reserve"}
 }
-resolved_model = cli_model if cli_model else default_models.get(selected_agent, {}).get(model_tier, "")
+resolved_model = cli_model if cli_model else (default_models.get(selected_agent) or {}).get(model_tier, "")
 
 c_sig_str = ", ".join(signals_c) if signals_c else "None"
 u_sig_str = ", ".join(signals_u) if signals_u else "Standard"
@@ -2071,12 +2071,13 @@ extra_context = sys.argv[5].strip() if len(sys.argv) > 5 else ""
 with open(resp_path, "r", encoding="utf-8") as f:
     data = json.load(f)
 
-fields = data.get("fields", {})
+fields = data.get("fields") or {}
 summary = fields.get("summary") or ""
-status = fields.get("status", {}).get("name") or "Unknown"
-issue_type = fields.get("issuetype", {}).get("name") or "Task"
-priority = fields.get("priority", {}).get("name") or "Medium"
-assignee = fields.get("assignee", {}).get("displayName") or "Unassigned"
+status = (fields.get("status") or {}).get("name") or "Unknown"
+issue_type = (fields.get("issuetype") or {}).get("name") or "Task"
+priority = (fields.get("priority") or {}).get("name") or "Medium"
+assignee_obj = fields.get("assignee") or {}
+assignee = assignee_obj.get("displayName") or assignee_obj.get("name") or "Unassigned"
 
 raw_desc = fields.get("description")
 desc_text = ""
