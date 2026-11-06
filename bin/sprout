@@ -531,7 +531,7 @@ while True:
 
             size_kb = (size_bytes / 1024.0) if size_bytes > 0 else (scroll_lines * 70.0 / 1024.0)
 
-            if size_kb >= threshold_kb or scroll_lines >= 2000:
+            if size_kb >= threshold_kb:
                 log_msg(f"Triggering auto-recycle for {agent_name} in {cwd} (Size: {size_kb:.1f}KB, Scroll: {scroll_lines} lines)")
                 cooldowns[pane_id] = now_ts
                 
@@ -592,7 +592,7 @@ while True:
                 a_name = ag.get("name") or ag.get("agent")
                 cwd = ag.get("cwd") or ag.get("foreground_cwd")
                 size_kb, scroll_lines, _ = estimate_context_metrics(ag)
-                status_note = f"⚠️ EXCEEDED ({size_kb:.1f}KB)" if size_kb >= threshold_kb or scroll_lines >= 2000 else f"OK ({size_kb:.1f}KB, {scroll_lines} lines)"
+                status_note = f"⚠️ EXCEEDED ({size_kb:.1f}KB)" if size_kb >= threshold_kb else f"OK ({size_kb:.1f}KB, {scroll_lines} lines)"
                 print(f"  └─ Pane {p_id} ({a_name}) in {cwd}: {status_note}")
             time.sleep(interval_sec)
     except KeyboardInterrupt:
