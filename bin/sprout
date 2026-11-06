@@ -10,11 +10,16 @@ auth_file="$config_dir/auth.toml"
 usage() {
   cat >&2 <<'HELP'
 Usage:
+  sprout plant <REPO_URL_OR_PATH> [DEST_DIR] [options]
   sprout init
   sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
   sprout <type> [TEXT | --context <TEXT>] [options]
   sprout <type> (--issue <ISSUE-KEY> | --feature <name>) [options]
+
+Tree Planting & Initialization:
+  sprout plant <URL_OR_PATH> [DIR] [options]   Plant base repository tree from a Git URL/path & checkout branch
+  sprout init                                  Interactive initialization inside an existing base repository
 
 Session Management & Autonomous Watcher:
   sprout session status                        View active agent session, pane, context metrics, and watcher state
@@ -31,6 +36,7 @@ Options:
   TEXT                 Optional positional text describing the task/goal (bypasses Jira)
   -c, --context TEXT   Free-form task context (use '-' to read from stdin)
   --context-file FILE  Read task context from a markdown or text file
+  -b, --branch BRANCH  Branch to checkout (used with plant; defaults to default branch or #branch in URL)
   --issue KEY          Issue key (e.g. Jira); fetches details to generate branch slug and .sprout/issue.json
   --feature NAME       Directory name; auto-derived from context or issue if omitted; lowercased with underscores
   --slug SLUG          Branch slug; defaults to feature name; lowercased with hyphens converted to underscores
@@ -49,6 +55,9 @@ Options:
 and defaults under shared Git metadata, and tracker credentials in $HOME/.sprout/auth.toml.
 
 Examples:
+  sprout plant git@github.com:m4rc0s/sprout.git
+  sprout plant https://github.com/m4rc0s/sprout.git --branch develop
+  sprout plant /path/to/existing/repo ~/workspace/novo_repo
   sprout feat "Adicionar exportação CSV no relatório de vendas"
   sprout fix "Deadlock no pool de conexões do postgres" --agent agy
   sprout docs "Atualizar guia de onboarding e setup"
@@ -916,6 +925,243 @@ print(f"Jira credentials saved to {auth_config}")
 print(f"Base repository detected as {base_repo}; its path was not saved in either config.")
 PYINIT
 }
+
+plant_repository() {
+  local source_input=""
+  local dest_input=""
+  local branch_override=""
+  local name_override=""
+  local agent_override="auto"
+  local method_override="bmad"
+  local no_herdr=false
+
+  while (($#)); do
+    case "$1" in
+      -b|--branch)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        branch_override=$2; shift 2 ;;
+      --dest)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        dest_input=$2; shift 2 ;;
+      --name)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        name_override=$2; shift 2 ;;
+      -a|--agent)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        agent_override=$2; shift 2 ;;
+      -m|--method)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        method_override=$2; shift 2 ;;
+      --no-herdr)
+        no_herdr=true; shift ;;
+      -h|--help)
+        cat <<'PLANTHelp'
+Usage:
+  sprout plant <REPO_URL_OR_PATH> [DEST_DIR] [options]
+
+Plant a base repository tree from a Git URL or local path into a clean directory,
+setting up Git tracking, branch checkout, and Sprout configuration deterministically without LLMs.
+
+Options:
+  -b, --branch BRANCH   Branch to checkout after cloning (e.g. main, develop, feat/xyz)
+  --dest PATH           Destination directory (defaults to repo name in current working dir)
+  --name NAME           Project display name (defaults to repository name)
+  -a, --agent NAME      Default agent (auto, claude, agy, codex). Default: auto
+  -m, --method NAME     Default methodology (bmad, scpe, none). Default: bmad
+  --no-herdr            Do not create or focus workspace in Herdr
+  -h, --help            Show this help
+
+Examples:
+  sprout plant git@github.com:m4rc0s/sprout.git
+  sprout plant https://github.com/m4rc0s/sprout.git --branch develop
+  sprout plant /path/to/existing/repo ~/workspace/novo_repo
+  sprout plant git@github.com:org/repo.git#feat/v2 .
+PLANTHelp
+        exit 0
+        ;;
+      -*)
+        printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+      *)
+        if [[ -z "$source_input" ]]; then
+          source_input=$1
+        elif [[ -z "$dest_input" ]]; then
+          dest_input=$1
+        else
+          printf 'Unexpected positional argument: %s\n' "$1" >&2; exit 2
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$source_input" ]] || {
+    printf 'Error: Provide a repository URL or local Git path.\nRun sprout plant --help for usage.\n' >&2
+    exit 1
+  }
+
+  # Parse repository URL/path and embedded branch
+  local parsed_info
+  parsed_info=$(python3 - "$source_input" <<'PYPARSE'
+import sys, re
+
+raw = sys.argv[1].strip()
+branch = ""
+if "#" in raw:
+    raw, branch = raw.split("#", 1)
+
+clean = re.sub(r"\.git/?$", "", raw.rstrip("/"))
+name = re.split(r"[/:]", clean)[-1]
+name = re.sub(r"[^\w.-]", "_", name)
+
+github_repo = ""
+m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", raw)
+if m:
+    github_repo = m.group(1)
+
+print(f"{raw}\t{name}\t{branch}\t{github_repo}")
+PYPARSE
+  )
+
+  local repo_url repo_name branch_from_url gh_repo
+  repo_url=$(awk -F'\t' '{print $1}' <<< "$parsed_info")
+  repo_name=$(awk -F'\t' '{print $2}' <<< "$parsed_info")
+  branch_from_url=$(awk -F'\t' '{print $3}' <<< "$parsed_info")
+  gh_repo=$(awk -F'\t' '{print $4}' <<< "$parsed_info")
+
+  local target_branch="${branch_override:-$branch_from_url}"
+  local project_name="${name_override:-$repo_name}"
+
+  # Determine destination directory
+  local target_dir
+  if [[ -n "$dest_input" ]]; then
+    if [[ "$dest_input" == "." ]]; then
+      target_dir="$(pwd -P)"
+    elif [[ "$dest_input" = /* ]]; then
+      target_dir="$dest_input"
+    else
+      target_dir="$(pwd -P)/$dest_input"
+    fi
+  else
+    target_dir="$(pwd -P)/$repo_name"
+  fi
+
+  printf '\n🌱 [Sprout Plant] Planting base repository tree...\n'
+  printf '   Source:        %s\n' "$repo_url"
+  printf '   Destination:   %s\n' "$target_dir"
+  [[ -z "$target_branch" ]] || printf '   Target Branch: %s\n' "$target_branch"
+
+  # 1. Clone repository if not already cloned
+  if [[ -d "$target_dir/.git" ]]; then
+    printf '   Note: Directory %s is already a Git repository.\n' "$target_dir"
+  elif [[ -d "$target_dir" && $(ls -A "$target_dir" 2>/dev/null) ]]; then
+    printf 'Error: Destination directory %s exists and is not empty.\n' "$target_dir" >&2
+    exit 1
+  else
+    mkdir -p "$(dirname "$target_dir")"
+    if ! git clone "$repo_url" "$target_dir"; then
+      printf 'Error: Failed to clone repository from %s\n' "$repo_url" >&2
+      exit 1
+    fi
+  fi
+
+  # 2. Checkout target branch if specified
+  local active_branch
+  if [[ -n "$target_branch" ]]; then
+    if git -C "$target_dir" rev-parse --verify "refs/heads/$target_branch" >/dev/null 2>&1; then
+      git -C "$target_dir" checkout "$target_branch" >/dev/null 2>&1 || true
+    elif git -C "$target_dir" rev-parse --verify "refs/remotes/origin/$target_branch" >/dev/null 2>&1; then
+      git -C "$target_dir" checkout --track "origin/$target_branch" >/dev/null 2>&1 || git -C "$target_dir" checkout -b "$target_branch" "origin/$target_branch" >/dev/null 2>&1 || true
+    else
+      git -C "$target_dir" checkout -b "$target_branch" >/dev/null 2>&1 || true
+    fi
+  fi
+  active_branch=$(git -C "$target_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+
+  # 3. Resolve metadata
+  local resolved canonical_root common_dir
+  resolved=$(resolve_repository "$target_dir") || {
+    printf 'Error: Could not resolve git repository metadata at %s\n' "$target_dir" >&2
+    exit 1
+  }
+  canonical_root=$(sed -n '1p' <<< "$resolved")
+  common_dir=$(sed -n '2p' <<< "$resolved")
+
+  # 4. Initialize Sprout configuration (100% deterministic, zero LLMs)
+  local sprout_dir="$common_dir/sprout"
+  mkdir -p "$sprout_dir"
+  local config_file="$sprout_dir/config.toml"
+
+  if [[ ! -f "$config_file" ]]; then
+    cat > "$config_file" <<EOF
+[project]
+name = "${project_name}"
+github_repo = "${gh_repo}"
+
+[defaults]
+agent = "${agent_override}"
+method = "${method_override}"
+
+[models.tier_map]
+feat = "frontier"
+fix = "frontier"
+refactor = "frontier"
+perf = "frontier"
+spike = "frontier"
+test = "balanced"
+build = "balanced"
+docs = "fast"
+chore = "fast"
+style = "fast"
+ci = "fast"
+revert = "fast"
+EOF
+    printf '   Config:        Created %s\n' "$config_file"
+  else
+    printf '   Config:        Existing %s found\n' "$config_file"
+  fi
+
+  # 5. Initialize agents_status.json
+  local status_file="$sprout_dir/agents_status.json"
+  if [[ ! -f "$status_file" ]]; then
+    local global_status="$HOME/.sprout/agents_status.json"
+    if [[ -f "$global_status" ]]; then
+      cp "$global_status" "$status_file"
+    else
+      cat > "$status_file" <<'EOF'
+{
+  "claude": {"tokens_consumed_5h": 0, "active_sessions": 0, "cooldown_until": 0, "reason": ""},
+  "agy": {"tokens_consumed_5h": 0, "active_sessions": 0, "cooldown_until": 0, "reason": ""},
+  "codex": {"tokens_consumed_5h": 0, "active_sessions": 0, "cooldown_until": 0, "reason": ""}
+}
+EOF
+    fi
+  fi
+
+  # 6. Herdr integration
+  if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1; then
+    if herdr status client >/dev/null 2>&1; then
+      printf '   Herdr:         Workspace %s registered\n' "$project_name"
+      herdr workspace create --cwd "$target_dir" --label "$project_name" --focus >/dev/null 2>&1 || true
+    fi
+  fi
+
+  printf '\n✨ Tree planted successfully! (A árvore base foi plantada e enraizada)\n'
+  printf '   Location:      %s\n' "$target_dir"
+  printf '   Active Branch: %s\n' "$active_branch"
+  printf '   Default Agent: %s\n' "$agent_override"
+  printf '   Default Method:%s\n' "$method_override"
+  printf '\nPara começar a brotar novas tarefas (sprout worktrees):\n'
+  printf '   cd %q\n' "$target_dir"
+  printf '   sprout feat "Sua primeira feature"\n'
+  printf '   sprout fix "Seu primeiro bug fix"\n'
+  printf '   sprout session status\n\n'
+}
+
+if [[ "${1:-}" == "plant" ]]; then
+  shift
+  plant_repository "$@"
+  exit 0
+fi
 
 if [[ "${1:-}" == "session" ]]; then
   shift

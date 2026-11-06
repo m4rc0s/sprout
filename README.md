@@ -33,10 +33,23 @@ cd sprout
 cp bin/sprout ~/.local/bin/sprout
 ```
 
-### 2. Initialize your project
+### 2. Plant the Tree or Initialize an Existing Repo
 
-Run `sprout init` from within your **canonical base Git repository**:
+**Option A: Plant from scratch in any clean directory (`sprout plant`)**
+If starting from an arbitrary directory without a pre-existing workspace, use `sprout plant` to clone, checkout the desired branch, and configure Sprout 100% deterministically with zero LLMs:
+```bash
+# Plant repository tree into ./finance_tool on default branch
+sprout plant git@github.com:my-org/finance_tool.git
 
+# Plant and checkout a specific branch
+sprout plant https://github.com/my-org/finance_tool.git --branch develop
+
+# Plant into a custom destination directory
+sprout plant /path/to/existing/repo ~/workspace/finance_tool
+```
+
+**Option B: Initialize inside an existing local repository (`sprout init`)**
+If you already have a canonical base repository cloned:
 ```bash
 cd ~/workspace/my-project
 sprout init
