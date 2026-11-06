@@ -47,19 +47,22 @@ The `--method` (or `-m`) flag defines what initial prompt is injected into the a
 ### 1. BMad Method (`-m bmad`) - Default
 The BMad method uses an orchestrator skill (`bmad`) that guides analysis, product briefs, and implementations.
 
-**Prompt injected:**
+**Prompt injected (Jira Issue):**
 > *"BMad, analise a feature/issue <KEY> (<SUMMARY>). A descrição e os detalhes do Jira estão salvos em .sprout/issue.json e .sprout/issue.md. Inicie a análise inicial para elaborarmos o briefing da implementação."*
+
+**Prompt injected (Free-form Context / Non-Jira):**
+> *"BMad, analise a tarefa <KEY> (<SUMMARY>). O briefing e contexto inicial estão salvos em .sprout/issue.json e .sprout/issue.md. Inicie a análise inicial para elaborarmos o plano de implementação."*
 
 **What happens next:**
 - The agent activates the `bmad` skill.
-- Reads `.sprout/issue.json` to extract requirements, acceptance criteria, and edge cases.
+- Reads `.sprout/issue.json` and `.sprout/issue.md` to extract requirements, acceptance criteria, and edge cases.
 - Begins drafting the initiative/briefing document (under `_bmad-output/`) and waits for your confirmation to continue.
 
 ### 2. SCPE Method (`-m scpe`)
 [Spec-Compiled Product Engineering (SCPE)](https://github.com/m4rc0s/scpe) focuses on executable specs, vertical slices, and rules/scenarios.
 
 **Prompt injected:**
-> *"SCPE: analise a issue <KEY> (<SUMMARY>) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."*
+> *"SCPE: analise a tarefa <KEY> (<SUMMARY>) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."*
 
 **What happens next:**
 - The agent reads `.sprout/issue.json`.

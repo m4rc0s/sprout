@@ -13,6 +13,7 @@ Usage:
   sprout init
   sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
+  sprout <type> [TEXT | --context <TEXT>] [options]
   sprout <type> (--issue <ISSUE-KEY> | --feature <name>) [options]
 
 Session Management & Autonomous Watcher:
@@ -27,9 +28,12 @@ Agent Management:
 
 Types: feat, fix, doc, docs, style, refactor, perf, test, build, ci, chore, revert
 Options:
+  TEXT                 Optional positional text describing the task/goal (bypasses Jira)
+  -c, --context TEXT   Free-form task context (use '-' to read from stdin)
+  --context-file FILE  Read task context from a markdown or text file
   --issue KEY          Issue key (e.g. Jira); fetches details to generate branch slug and .sprout/issue.json
-  --feature NAME       Directory name; defaults to the issue key when --issue is used; lowercased with hyphens converted to underscores
-  --slug SLUG          Branch slug; defaults to the issue key when --issue is used, otherwise --feature; lowercased with hyphens converted to underscores
+  --feature NAME       Directory name; auto-derived from context or issue if omitted; lowercased with underscores
+  --slug SLUG          Branch slug; defaults to feature name; lowercased with hyphens converted to underscores
   --base PATH          Base repository; defaults to current Git repo, then BASE_REPO, then ~/workspace/finance_tool
   --dest PATH          Full worktree destination; defaults to sibling directory named after feature/key
   -a, --agent NAME     Agent to launch in Herdr workspace (auto, claude, agy, codex). Default: auto (headroom-first router)
@@ -45,15 +49,11 @@ Options:
 and defaults under shared Git metadata, and tracker credentials in $HOME/.sprout/auth.toml.
 
 Examples:
-  sprout init
-  sprout session status
-  sprout session recycle
-  sprout session watch --daemon
-  sprout agent status
-  sprout agent cooldown claude --for 2h --reason "5h token window reached"
+  sprout feat "Adicionar exportação CSV no relatório de vendas"
+  sprout fix "Deadlock no pool de conexões do postgres" --agent agy
+  sprout docs "Atualizar guia de onboarding e setup"
   sprout fix --issue FT-123
   sprout feat --issue FT-456 --agent agy --method scpe
-  sprout docs --feature guide-refresh --agent codex
 HELP
   exit 2
 }
@@ -954,6 +954,7 @@ esac
 issue=
 feature=
 slug=
+text_context=
 base_override=
 dest_override=
 agent_opt=
@@ -965,7 +966,7 @@ no_herdr=false
 
 while (($#)); do
   case "$1" in
-    --issue|--feature|--slug|--base|--dest|-a|--agent|--model|--effort|-m|--method)
+    --issue|--feature|--slug|--base|--dest|-a|--agent|--model|--effort|-m|--method|-c|--context|--context-file)
       (($# >= 2)) || usage
       option=$1
       value=$2
@@ -974,6 +975,23 @@ while (($#)); do
         --issue) [[ -z "$issue" ]] || usage; issue=$value ;;
         --feature) [[ -z "$feature" ]] || usage; feature=$value ;;
         --slug) [[ -z "$slug" ]] || usage; slug=$value ;;
+        -c|--context)
+          [[ -z "$text_context" ]] || usage
+          if [[ "$value" == "-" ]]; then
+            text_context=$(cat)
+          else
+            text_context=$value
+          fi
+          ;;
+        --context-file)
+          [[ -z "$text_context" ]] || usage
+          if [[ -f "$value" ]]; then
+            text_context=$(<"$value")
+          else
+            printf 'Context file not found: %s\n' "$value" >&2
+            exit 1
+          fi
+          ;;
         --base) [[ -z "$base_override" ]] || usage; base_override=$value ;;
         --dest) [[ -z "$dest_override" ]] || usage; dest_override=$value ;;
         -a|--agent) [[ -z "$agent_opt" ]] || usage; agent_opt=$value ;;
@@ -991,7 +1009,16 @@ while (($#)); do
       shift
       ;;
     --help|-h) usage ;;
-    *) printf 'Unknown argument: %s\n' "$1" >&2; usage ;;
+    -*)
+      printf 'Unknown argument: %s\n' "$1" >&2; usage ;;
+    *)
+      if [[ -z "$text_context" && -z "$issue" ]]; then
+        text_context=$1
+        shift
+      else
+        printf 'Unexpected argument: %s\n' "$1" >&2; usage
+      fi
+      ;;
   esac
 done
 
@@ -1046,16 +1073,75 @@ issue_type=""
 priority=""
 desc_plain=""
 
-# Fetch Jira details if --issue was provided so the Semantic Complexity Engine can read it
-JIRA_BASE_URL=${JIRA_BASE_URL:-}
-JIRA_EMAIL=${JIRA_EMAIL:-}
-JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
-if [[ -f "$auth_file" ]]; then
-  command -v python3 >/dev/null || { printf 'python3 is required to read auth configuration.\n' >&2; exit 1; }
-  for key in base_url email api_token; do
-    var=JIRA_${key^^}
-    if [[ -z "${!var}" ]]; then
-      encoded_value=$(python3 - "$auth_file" "$key" <<'PYAUTH'
+# 1. Process free-form text context if provided
+if [[ -n "$text_context" ]]; then
+  summary=$(head -n 1 <<< "$text_context" | cut -c1-120)
+  desc_plain="$text_context"
+
+  if [[ -z "$feature" ]]; then
+    feature=$(python3 - "$summary" <<'PYSLUG'
+import sys, unicodedata, re
+
+text = sys.argv[1].strip()
+norm = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+norm = re.sub(r"[^\w\s-]", "", norm).strip().lower()
+words = [re.sub(r"[-\s]+", "", w) for w in norm.split() if w]
+stop_words = {"de", "do", "da", "dos", "das", "no", "na", "nos", "nas", "em", "para", "com", "por", "the", "a", "an", "of", "in", "on", "for", "with", "to", "and", "e"}
+res = []
+cur_len = 0
+for w in words:
+    add_len = len(w) + (1 if res else 0)
+    if cur_len + add_len > 32 and res:
+        break
+    res.append(w)
+    cur_len += add_len
+while len(res) > 1 and res[-1] in stop_words:
+    res.pop()
+slug = "_".join(res) or "task"
+print(slug)
+PYSLUG
+    )
+  fi
+
+  case "$type" in
+    fix) issue_type="Bug" ;;
+    feat) issue_type="Feature" ;;
+    refactor) issue_type="Refactoring" ;;
+    perf) issue_type="Performance" ;;
+    test) issue_type="Test" ;;
+    docs|doc) issue_type="Documentation" ;;
+    style) issue_type="Style" ;;
+    chore|ci|build) issue_type="Chore" ;;
+    revert) issue_type="Revert" ;;
+    *) issue_type="Task" ;;
+  esac
+
+  priority=$(python3 - "$text_context" <<'PYPRIO'
+import sys, re
+text = sys.argv[1].lower()
+if re.search(r'\b(critical|urgent|urgente|emergenc|bloqueante|p0|grave|down|quebr|panic)\b', text):
+    print("Critical")
+elif re.search(r'\b(high|alta|importante|p1|prioridade|security|vulnerab)\b', text):
+    print("High")
+elif re.search(r'\b(low|baixa|trivial|minor|cosmetic|p3|typo)\b', text):
+    print("Low")
+else:
+    print("Medium")
+PYPRIO
+  )
+fi
+
+# 2. Fetch Jira details if --issue was provided so the Semantic Complexity Engine can read it
+if [[ -n "$issue" ]]; then
+  JIRA_BASE_URL=${JIRA_BASE_URL:-}
+  JIRA_EMAIL=${JIRA_EMAIL:-}
+  JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
+  if [[ -f "$auth_file" ]]; then
+    command -v python3 >/dev/null || { printf 'python3 is required to read auth configuration.\n' >&2; exit 1; }
+    for key in base_url email api_token; do
+      var=JIRA_${key^^}
+      if [[ -z "${!var}" ]]; then
+        encoded_value=$(python3 - "$auth_file" "$key" <<'PYAUTH'
 import base64
 import sys
 import tomllib
@@ -1064,13 +1150,12 @@ with open(sys.argv[1], "rb") as stream:
     key = sys.argv[2]
     print(base64.b64encode(str(jira.get(key, "")).encode()).decode())
 PYAUTH
-      )
-      declare "$var=$(printf '%s' "$encoded_value" | base64 --decode)"
-    fi
-  done
-fi
+        )
+        declare "$var=$(printf '%s' "$encoded_value" | base64 --decode)"
+      fi
+    done
+  fi
 
-if [[ -n "$issue" ]]; then
   command -v jq >/dev/null || { printf 'jq is required when using --issue.\n' >&2; exit 1; }
   command -v curl >/dev/null || { printf 'curl is required when using --issue.\n' >&2; exit 1; }
   [[ -n "$JIRA_BASE_URL" ]] || { printf 'JIRA_BASE_URL is not set and auth.toml missing: %s\n' "$auth_file" >&2; exit 1; }
@@ -1114,13 +1199,53 @@ if [[ -n "$issue" ]]; then
   issue_type=$(jq -r '.fields.issuetype.name // ""' <<<"$issue_json")
   priority=$(jq -r '.fields.priority.name // ""' <<<"$issue_json")
   
+  jira_desc=$(python3 - "$response_file" <<'PYDESC'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    raw = data.get("fields", {}).get("description")
+    def extract_text(node):
+        if isinstance(node, dict):
+            t = node.get("text", "") if node.get("type") == "text" else ""
+            return t + "".join(extract_text(v) for v in node.values())
+        elif isinstance(node, list):
+            return "".join(extract_text(i) for i in node)
+        return str(node) if isinstance(node, str) else ""
+    print(extract_text(raw).strip() if raw else "")
+except Exception:
+    print("")
+PYDESC
+  )
+  if [[ -n "$text_context" ]]; then
+    desc_plain="${jira_desc}
+
+${text_context}"
+  else
+    desc_plain="$jira_desc"
+  fi
+
   feature=${feature:-$issue}
   feature=$(printf '%s' "$feature" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
   slug=${slug:-$issue}
   slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
 fi
 
-[[ -n "$feature" ]] || { printf 'Provide --issue or --feature.\n' >&2; usage; }
+# 3. Fallbacks when neither issue nor text context is provided
+if [[ -z "$summary" ]]; then
+  summary=${feature:-}
+  desc_plain=${feature:-}
+  issue_type="Task"
+  priority="Medium"
+fi
+
+feature=${feature:-$issue}
+feature=$(printf '%s' "$feature" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+slug=${slug:-$feature}
+slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+summary=${summary:-$feature}
+
+[[ -n "$feature" ]] || { printf 'Provide a task context, --issue, or --feature.\n' >&2; usage; }
 slug=${slug:-$feature}
 summary=${summary:-$feature}
 
@@ -1382,14 +1507,18 @@ git -C "$repo" worktree add --track -b "$branch" "$target" origin/main
 printf '\nCreated worktree: %s\nBranch: %s (tracking origin/main)\nBase: %s\n' "$target" "$branch" "$repo"
 [[ -z "$project_name" ]] || printf 'Project: %s\n' "$project_name"
 [[ -z "$github_repo" ]] || printf 'GitHub: %s\n' "$github_repo"
-[[ -z "$issue" ]] || printf 'Issue: %s — %s\n' "$issue" "$summary"
+if [[ -n "$issue" ]]; then
+  printf 'Issue: %s — %s\n' "$issue" "$summary"
+else
+  printf 'Task: %s\n' "$summary"
+fi
+
+mkdir -p "$target/.sprout"
+ln -sfn .sprout "$target/.jdw" 2>/dev/null || true
 
 # Generate normalized issue model (.sprout/issue.json and .sprout/issue.md)
 if [[ -n "$issue" && -n "$response_file" && -f "$response_file" ]]; then
-  mkdir -p "$target/.sprout"
-  ln -sfn .sprout "$target/.jdw" 2>/dev/null || true
-
-  python3 - "$response_file" "$target/.sprout" "$issue" "$jira_host" <<'PYNORM'
+  python3 - "$response_file" "$target/.sprout" "$issue" "$jira_host" "${text_context:-}" <<'PYNORM'
 import json
 import sys
 from pathlib import Path
@@ -1398,6 +1527,7 @@ resp_path = Path(sys.argv[1])
 out_dir = Path(sys.argv[2])
 issue_key = sys.argv[3]
 jira_host = sys.argv[4]
+extra_context = sys.argv[5].strip() if len(sys.argv) > 5 else ""
 
 with open(resp_path, "r", encoding="utf-8") as f:
     data = json.load(f)
@@ -1429,6 +1559,9 @@ if isinstance(raw_desc, dict) and raw_desc.get("type") == "doc":
 elif isinstance(raw_desc, str):
     desc_text = raw_desc
 
+if extra_context:
+    desc_text = f"{desc_text.strip()}\n\n## Developer Context / Notes\n{extra_context}"
+
 issue_model = {
     "key": issue_key,
     "summary": summary,
@@ -1437,6 +1570,7 @@ issue_model = {
     "priority": priority,
     "assignee": assignee,
     "description": desc_text.strip(),
+    "source": "jira",
     "url": f"https://{jira_host}/browse/{issue_key}"
 }
 
@@ -1453,6 +1587,45 @@ with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
     f.write(f"## Descrição\n\n{desc_text.strip()}\n")
 PYNORM
   printf 'Saved issue context to %s/.sprout/issue.json and issue.md\n' "$target"
+elif [[ -n "$summary" ]]; then
+  python3 - "$target/.sprout" "$branch" "$summary" "${desc_plain:-$summary}" "${issue_type:-Task}" "${priority:-Medium}" <<'PYNORM_MANUAL'
+import json, sys, os
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+branch = sys.argv[2]
+summary = sys.argv[3]
+desc_text = sys.argv[4]
+issue_type = sys.argv[5]
+priority = sys.argv[6]
+
+user_name = os.getenv("USER") or "developer"
+
+issue_model = {
+    "key": branch,
+    "summary": summary,
+    "status": "In Progress",
+    "type": issue_type,
+    "priority": priority,
+    "assignee": user_name,
+    "description": desc_text.strip(),
+    "source": "manual",
+    "url": ""
+}
+
+with open(out_dir / "issue.json", "w", encoding="utf-8") as f:
+    json.dump(issue_model, f, indent=2, ensure_ascii=False)
+
+with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
+    f.write(f"# [{issue_type}] {summary}\n\n")
+    f.write(f"- **Tipo:** {issue_type}\n")
+    f.write(f"- **Prioridade:** {priority}\n")
+    f.write(f"- **Origem:** Manual / Free-form Context\n")
+    f.write(f"- **Branch:** `{branch}`\n")
+    f.write(f"- **Responsável:** {user_name}\n\n")
+    f.write(f"## Descrição / Objetivo\n\n{desc_text.strip()}\n")
+PYNORM_MANUAL
+  printf 'Saved task context to %s/.sprout/issue.json and issue.md\n' "$target"
 fi
 
 # Integrate with Herdr if available and enabled
@@ -1494,16 +1667,20 @@ if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1; then
         method_prompt=""
         case "$method" in
           bmad)
-            method_prompt="BMad, analise a feature/issue $workspace_label (${summary:-$feature}). A descrição e os detalhes do Jira estão salvos em .sprout/issue.json e .sprout/issue.md. Inicie a análise inicial para elaborarmos o briefing da implementação."
+            if [[ -n "$issue" ]]; then
+              method_prompt="BMad, analise a feature/issue $workspace_label (${summary:-$feature}). A descrição e os detalhes do Jira estão salvos em .sprout/issue.json e .sprout/issue.md. Inicie a análise inicial para elaborarmos o briefing da implementação."
+            else
+              method_prompt="BMad, analise a tarefa $workspace_label (${summary:-$feature}). O briefing e contexto inicial estão salvos em .sprout/issue.json e .sprout/issue.md. Inicie a análise inicial para elaborarmos o plano de implementação."
+            fi
             ;;
           scpe)
-            method_prompt="SCPE: analise a issue $workspace_label (${summary:-$feature}) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."
+            method_prompt="SCPE: analise a tarefa $workspace_label (${summary:-$feature}) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."
             ;;
           none|"")
             method_prompt=""
             ;;
           *)
-            method_prompt="Analise a issue $workspace_label (${summary:-$feature}). Detalhes disponíveis em .sprout/issue.json."
+            method_prompt="Analise a tarefa $workspace_label (${summary:-$feature}). Detalhes disponíveis em .sprout/issue.json."
             ;;
         esac
 

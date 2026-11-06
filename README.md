@@ -131,14 +131,24 @@ The **Sentinel Watcher** (`sprout session watch --daemon`) monitors file size on
 ### Worktree Creation
 
 ```bash
-# Smart Router workflow (picks the least saturated agent and tier-matched model)
+# Free-form text workflow (bypasses Jira; automatically derives branch slug & scores complexity)
+sprout feat "Adicionar exportação CSV no relatório de vendas"
+
+# Bug fix with urgent keyword -> automatically scores Frontier tier and High reasoning effort
+sprout fix "Deadlock no pool de conexões do postgres" --agent agy
+
+# Provide free-form context via flag or file
+sprout feat -c "Refatorar camada de autenticação para JWT stateless"
+sprout feat --context-file specs/auth.md
+
+# Jira-backed workflow (fetches summary, description, and metadata from Jira Cloud)
 sprout fix --issue FT-123
 
 # Fast-tier routing: automatically dispatches lightweight model (e.g. Haiku / Flash)
-sprout docs --feature update-api-docs
+sprout docs "Atualizar guia de onboarding e setup inicial"
 
 # Explicitly override the agent selection and model
-sprout feat --issue FT-456 --agent agy --model pro
+sprout feat --issue FT-456 --agent agy --model gemini-4-argon
 
 # Combine a specific agent with the SCPE methodology
 sprout feat --issue FT-456 -a agy -m scpe
@@ -161,12 +171,16 @@ sprout chore --feature cleanup_logs --slug prune_old_entries
 | Option | Short | Description |
 | :--- | :--- | :--- |
 | `<type>` | — | Positional Conventional Commit type (`feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). |
+| `[TEXT]` | — | Optional positional free-form task description (bypasses Jira; automatically generates branch slug). |
+| `--context <TEXT>`| `-c` | Free-form task context (use `-` to read from stdin). |
+| `--context-file <FILE>`| — | Read task context from a markdown or text file. |
 | `--issue <KEY>` | — | Issue key (e.g. `FT-123`). Fetches details, derives branch slug, and creates `.sprout/issue.json`. |
 | `--agent <NAME>` | `-a` | Agent runtime to start in Herdr (`auto`, `claude`, `agy`, `codex`, `gemini`). Default: `auto` (Smart Router). |
 | `--model <MODEL>`| — | Explicit model override (e.g. `opus`, `sonnet`, `gemini-4-argon`, `gemini-3.8-flash`, `gpt-6-luna`). Defaults to task-type tiering. |
+| `--effort <LEVEL>`| — | Explicit reasoning effort override (`high`, `medium`, `low`). |
 | `--method <NAME>`| `-m` | Initial methodology prompt template (`bmad`, `scpe`, `none`). |
-| `--feature <NAME>`| — | Directory name for the worktree (defaults to issue key; lowercased with hyphens converted to underscores). |
-| `--slug <SLUG>` | — | Branch name slug (defaults to the issue key when `--issue` is used, otherwise `--feature`; lowercased with hyphens converted to underscores). |
+| `--feature <NAME>`| — | Directory name for the worktree (defaults to issue key or auto-derived slug from context). |
+| `--slug <SLUG>` | — | Branch name slug (defaults to feature name; lowercased with hyphens converted to underscores). |
 | `--base <PATH>` | — | Base repository path (defaults to current Git repo, then `BASE_REPO`). |
 | `--dest <PATH>` | — | Explicit destination path for the worktree. |
 | `--no-agent` | — | Open Herdr workspace but do not start an agent. |
