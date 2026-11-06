@@ -90,7 +90,7 @@ manage_session_subcommand() {
   shift || true
 
   local pane_override="" agent_override="" daemon_flag=false stop_flag=false status_flag=false
-  local interval_sec=30 threshold_kb=120
+  local interval_sec=30 threshold_kb=1500
 
   while (($#)); do
     case "$1" in
@@ -136,7 +136,7 @@ Options:
   --stop               Stop the running background watcher daemon
   --status             Check background watcher daemon status
   --interval SECONDS   Watcher poll interval in seconds (default: 30)
-  --threshold KB       Context size threshold in KB to trigger handoff (default: 120)
+  --threshold KB       Context size threshold in KB to trigger handoff (default: 1500)
   -h, --help           Show this help
 HELPSESS
         exit 0
@@ -394,9 +394,34 @@ elif subcmd == "recycle":
 
     # 4. Spawn clean agent
     print(f"✓ Starting fresh {agent_kind} session in pane {pane_id} with pristine context...")
+    target_model = ""
+    target_effort = ""
+    sess_meta_file = sprout_dir / "session.json"
+    if sess_meta_file.exists():
+        try:
+            s_meta = json.loads(sess_meta_file.read_text(encoding="utf-8"))
+            target_model = s_meta.get("model", "")
+            target_effort = s_meta.get("effort", "")
+        except Exception:
+            pass
+
     extra_args = []
     if agent_kind == "agy":
         extra_args = ["--", "--new-project", "--project", worktree_root.name]
+        if target_model:
+            extra_args += ["--model", target_model]
+        if target_effort:
+            extra_args += ["--effort", target_effort]
+    elif agent_kind == "claude":
+        if target_model or target_effort:
+            extra_args = ["--"]
+            if target_model:
+                extra_args += ["--model", target_model]
+            if target_effort:
+                extra_args += ["--effort", target_effort]
+    elif agent_kind == "codex":
+        if target_model:
+            extra_args = ["--", "--model", target_model]
 
     launch_cmd = ["herdr", "agent", "start", agent_name, "--kind", agent_kind, "--pane", pane_id] + extra_args
     res = subprocess.run(launch_cmd, capture_output=True, text=True)
@@ -419,15 +444,22 @@ elif subcmd == "recycle":
 elif subcmd == "watch":
     if stop_flag:
         w_pid = get_watcher_pid()
+        killed = False
         if w_pid:
             try:
                 os.kill(w_pid, signal.SIGTERM)
                 print(f"✓ Stopped Sprout Session Watcher daemon (PID: {w_pid}).")
+                killed = True
             except Exception as e:
                 print(f"Error stopping watcher PID {w_pid}: {e}", file=sys.stderr)
             if pid_file.exists():
-                pid_file.unlink()
-        else:
+                try: pid_file.unlink()
+                except Exception: pass
+        try:
+            subprocess.run(["pkill", "-f", "Sprout Sentinel Watcher started"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        if not killed:
             print("No active Sprout Session Watcher daemon detected.")
         sys.exit(0)
 
@@ -529,8 +561,15 @@ while True:
             if str(cwd).endswith("/sprout"):
                 continue
 
-            # Anti-loop cooldown per pane (5 min minimum between auto-recycles)
-            if pane_id in cooldowns and (now_ts - cooldowns[pane_id] < 300):
+            agent_status = (ag.get("agent_status") or "").lower()
+            interactive_ready = ag.get("interactive_ready", False)
+
+            # Strict guard: NEVER touch an agent that is idle, done, waiting for user input, or not actively working!
+            if agent_status != "working" or interactive_ready:
+                continue
+
+            # Anti-loop cooldown per pane (10 min minimum between auto-recycles)
+            if pane_id in cooldowns and (now_ts - cooldowns[pane_id] < 600):
                 continue
 
             size_bytes = 0
@@ -576,8 +615,36 @@ while True:
                 terminate_pane(pane_id)
                 time.sleep(0.5)
 
-                # Respawn
-                extra = ["--", "--new-project", "--project", Path(cwd).name] if agent_kind == "agy" else []
+                # Respawn with preserved model/effort
+                sess_meta_file = sprout_dir / "session.json"
+                target_model = ""
+                target_effort = ""
+                if sess_meta_file.exists():
+                    try:
+                        s_meta = json.loads(sess_meta_file.read_text(encoding="utf-8"))
+                        target_model = s_meta.get("model", "")
+                        target_effort = s_meta.get("effort", "")
+                    except Exception:
+                        pass
+
+                extra = []
+                if agent_kind == "agy":
+                    extra = ["--", "--new-project", "--project", Path(cwd).name]
+                    if target_model:
+                        extra += ["--model", target_model]
+                    if target_effort:
+                        extra += ["--effort", target_effort]
+                elif agent_kind == "claude":
+                    if target_model or target_effort:
+                        extra = ["--"]
+                        if target_model:
+                            extra += ["--model", target_model]
+                        if target_effort:
+                            extra += ["--effort", target_effort]
+                elif agent_kind == "codex":
+                    if target_model:
+                        extra = ["--", "--model", target_model]
+
                 launch_cmd = ["herdr", "agent", "start", agent_name, "--kind", agent_kind, "--pane", pane_id] + extra
                 res = subprocess.run(launch_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 time.sleep(1.5)
@@ -603,16 +670,17 @@ while True:
     try:
         while True:
             out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
-            agents = json.loads(out).get("result", {}).get("agents", [])
+            agents = (json.loads(out).get("result") or {}).get("agents") or []
             ts = datetime.now().strftime("%H:%M:%S")
             print(f"[{ts}] Active agents: {len(agents)}")
             for ag in agents:
                 p_id = ag.get("pane_id")
                 a_name = ag.get("name") or ag.get("agent")
                 cwd = ag.get("cwd") or ag.get("foreground_cwd")
+                st = (ag.get("agent_status") or "unknown").upper()
                 size_kb, scroll_lines, _ = estimate_context_metrics(ag)
                 status_note = f"⚠️ EXCEEDED ({size_kb:.1f}KB)" if size_kb >= threshold_kb else f"OK ({size_kb:.1f}KB, {scroll_lines} lines)"
-                print(f"  └─ Pane {p_id} ({a_name}) in {cwd}: {status_note}")
+                print(f"  └─ Pane {p_id} ({a_name} [{st}]) in {cwd}: {status_note}")
             time.sleep(interval_sec)
     except KeyboardInterrupt:
         print("\nWatcher stopped.")
@@ -1413,6 +1481,14 @@ PYROUTE
         esac
 
         printf '   Herdr Agent:   Starting %s (%s, model: %s) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$pane_id"
+        cat > "$target_dir/.sprout/session.json" <<EOF
+{
+  "agent": "$chosen_agent",
+  "tier": "frontier",
+  "model": "$agent_model",
+  "effort": "high"
+}
+EOF
         local agent_extra_args=()
         if [[ "$chosen_agent" == "agy" ]]; then
           agent_extra_args=(-- --new-project --project "$project_name" --model "$agent_model" --effort high)
@@ -2007,12 +2083,6 @@ printf '\n🌱 [Smart Agent Router]\n'
 printf '   Selected Agent:  %s (%s)\n' "$agent" "$agent_rationale"
 printf '   Resolved Model:  %s\n' "$model_name"
 
-# Ensure the autonomous watcher daemon is running silently in background
-watcher_pid_file="$config_dir/watch.pid"
-if [[ ! -f "$watcher_pid_file" ]] || ! kill -0 "$(<"$watcher_pid_file")" 2>/dev/null; then
-  sprout session watch --daemon >/dev/null 2>&1 || true
-fi
-
 method=${method_opt:-${default_method:-bmad}}
 
 if [[ -n "$dest_override" ]]; then
@@ -2179,6 +2249,14 @@ if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1; then
     if [[ "$no_agent" != "true" && -n "$pane_id" ]]; then
       safe_agent_name=$(printf 'agent-%s' "$workspace_label" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
       printf 'Starting agent %s (kind: %s, model: %s, effort: %s) in Herdr pane %s...\n' "$safe_agent_name" "$agent" "$model_name" "$reasoning_effort" "$pane_id"
+      cat > "$target/.sprout/session.json" <<EOF
+{
+  "agent": "$agent",
+  "tier": "$model_tier",
+  "model": "$model_name",
+  "effort": "$reasoning_effort"
+}
+EOF
       agent_extra_args=()
       if [[ "$agent" == "agy" ]]; then
         agent_extra_args=(-- --new-project --project "$workspace_label")
