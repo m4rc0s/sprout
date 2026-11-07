@@ -17,6 +17,7 @@ Usage:
   sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
   sprout check-review [PR_NUMBER_OR_URL] [options]
+  sprout prune [TARGET] [options]
   sprout <type> [TEXT | --context <TEXT>] [options]
   sprout <type> (--issue <ISSUE-KEY> | --feature <name>) [options]
 
@@ -29,6 +30,10 @@ Code Review Ingestion & Triage:
 
 Branch Synchronization:
   sprout sync [options]                        Fetch latest origin/main and rebase current branch onto it (alias: rebase)
+
+Teardown:
+  sprout prune [TARGET] [options]              Close the Herdr workspace and remove the worktree, local branch, and
+                                                remote branch for a sprouted task (defaults to the current worktree)
 
 Session Management & Autonomous Watcher:
   sprout session status                        View active agent session, pane, context metrics, and watcher state
@@ -61,6 +66,16 @@ Options:
 `sprout init` must be run inside the canonical base repository. It stores project name, GitHub repo,
 and defaults under shared Git metadata, and tracker credentials in $HOME/.sprout/auth.toml.
 
+`sprout prune` options:
+  TARGET               Worktree path, feature/directory name, or branch to prune (defaults to the
+                        current worktree; cannot target the base repository checkout)
+  -y, --yes            Skip the confirmation prompt
+  --force              Remove the worktree despite uncommitted or unpushed changes, and force-delete
+                        the local branch even if it isn't fully merged
+  --keep-branch        Do not delete the local Git branch
+  --keep-remote        Do not delete the matching branch on origin
+  --no-herdr           Do not close the associated Herdr workspace
+
 Examples:
   # Plant a brand new project from a specification document:
   sprout plant vision.md
@@ -80,6 +95,11 @@ Examples:
   sprout docs "Atualizar guia de onboarding e setup"
   sprout fix --issue FT-123
   sprout feat --issue FT-456 --agent agy --method scpe
+
+  # Tear down a finished worktree (run from inside it, or name it from elsewhere):
+  sprout prune
+  sprout prune ft_123 --yes
+  sprout prune ../finance_tool/csv_export --keep-remote
 HELP
   exit "${1:-2}"
 }
@@ -2818,6 +2838,229 @@ sync_with_main_subcommand() {
   printf '✨ Branch %s is now current with origin/%s.\n\n' "$cur_branch" "$base_branch"
 }
 
+prune_worktree_subcommand() {
+  local target_input="" do_yes=false do_force=false keep_branch=false keep_remote=false no_herdr=false
+
+  while (($#)); do
+    case "$1" in
+      -y|--yes) do_yes=true; shift ;;
+      --force) do_force=true; shift ;;
+      --keep-branch) keep_branch=true; shift ;;
+      --keep-remote) keep_remote=true; shift ;;
+      --no-herdr) no_herdr=true; shift ;;
+      --help|-h) usage 0 ;;
+      -*) printf 'Unknown argument: %s\n' "$1" >&2; usage ;;
+      *)
+        [[ -z "$target_input" ]] || { printf 'Unexpected argument: %s\n' "$1" >&2; usage; }
+        target_input=$1
+        shift
+        ;;
+    esac
+  done
+
+  local cur_root
+  cur_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+
+  local target_dir=""
+  if [[ -n "$target_input" ]]; then
+    if [[ -d "$target_input" ]]; then
+      target_dir=$(cd "$target_input" && git rev-parse --show-toplevel 2>/dev/null || true)
+    fi
+    if [[ -z "$target_dir" ]]; then
+      local search_root="${cur_root:-${BASE_REPO:-}}"
+      if [[ -n "$search_root" ]]; then
+        target_dir=$(python3 - "$search_root" "$target_input" <<'PYFIND_WT'
+import subprocess, sys
+from pathlib import Path
+
+search_root = sys.argv[1]
+needle = sys.argv[2]
+needle_norm = needle.replace("-", "_").lower()
+
+proc = subprocess.run(
+    ["git", "-C", search_root, "worktree", "list", "--porcelain"],
+    capture_output=True, text=True
+)
+
+entries = []
+cur = {}
+for line in proc.stdout.splitlines():
+    if line.startswith("worktree "):
+        if cur:
+            entries.append(cur)
+        cur = {"path": line.split(" ", 1)[1]}
+    elif line.startswith("branch "):
+        cur["branch"] = line.split(" ", 1)[1].replace("refs/heads/", "")
+if cur:
+    entries.append(cur)
+
+for e in entries:
+    path = Path(e.get("path", ""))
+    branch = e.get("branch", "")
+    name_norm = path.name.replace("-", "_").lower()
+    branch_norm = branch.replace("-", "_").lower()
+    slug_norm = branch.split("/")[-1].replace("-", "_").lower() if branch else ""
+    if needle == branch or needle == str(path) or needle_norm in (name_norm, branch_norm, slug_norm):
+        print(str(path))
+        break
+PYFIND_WT
+        )
+      fi
+    fi
+    if [[ -z "$target_dir" || ! -d "$target_dir" ]]; then
+      printf 'Error: could not find a worktree matching: %s\n' "$target_input" >&2
+      exit 1
+    fi
+  else
+    target_dir="$cur_root"
+  fi
+
+  if [[ -z "$target_dir" ]]; then
+    printf 'Error: sprout prune must be run inside a worktree, or given a TARGET.\n' >&2
+    exit 1
+  fi
+  target_dir=$(cd "$target_dir" && pwd -P)
+
+  local resolved repo
+  resolved=$(resolve_repository "$target_dir") || {
+    printf 'Error: could not resolve Git repository metadata for: %s\n' "$target_dir" >&2
+    exit 1
+  }
+  repo=$(sed -n '1p' <<< "$resolved")
+
+  if [[ "$target_dir" == "$repo" ]]; then
+    printf 'Error: refusing to prune the base repository checkout: %s\n' "$repo" >&2
+    exit 1
+  fi
+
+  if ! git -C "$repo" worktree list --porcelain | grep -Fq "worktree $target_dir"; then
+    printf 'Error: %s is not a worktree of %s.\n' "$target_dir" "$repo" >&2
+    exit 1
+  fi
+
+  local branch
+  branch=$(git -C "$target_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  [[ -n "$branch" && "$branch" != "HEAD" ]] || branch=""
+
+  local dirty=false
+  if [[ -n "$(git -C "$target_dir" status --porcelain 2>/dev/null)" ]]; then
+    dirty=true
+  fi
+
+  local unpushed=0
+  if [[ -n "$branch" ]]; then
+    if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      unpushed=$(git -C "$repo" rev-list --count "origin/$branch..$branch" 2>/dev/null || echo 0)
+    else
+      unpushed=$(git -C "$repo" rev-list --count "$branch" 2>/dev/null || echo 0)
+    fi
+  fi
+
+  if [[ "$do_force" != "true" ]]; then
+    if [[ "$dirty" == "true" ]]; then
+      printf 'Error: %s has uncommitted changes. Commit/stash them or re-run with --force.\n' "$target_dir" >&2
+      exit 1
+    fi
+    if [[ "${unpushed:-0}" -gt 0 ]]; then
+      printf 'Error: branch %s has %s commit(s) not on origin. Push them or re-run with --force to discard.\n' "$branch" "$unpushed" >&2
+      exit 1
+    fi
+  fi
+
+  local remote_exists=false
+  if [[ -n "$branch" ]] && git -C "$repo" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    remote_exists=true
+  fi
+
+  # Locate the Herdr workspace backing this worktree by matching pane/agent cwd,
+  # the same approach used by check-review's auto-spawn lookup.
+  local ws_id=""
+  if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1 && herdr status client >/dev/null 2>&1; then
+    ws_id=$(python3 - "$target_dir" <<'PYFIND_WS'
+import json, subprocess, sys
+from pathlib import Path
+
+target_root = Path(sys.argv[1]).resolve()
+
+try:
+    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+    for ag in (json.loads(out).get("result") or {}).get("agents") or []:
+        for key in ("cwd", "foreground_cwd"):
+            p = ag.get(key, "")
+            if p and Path(p).resolve() == target_root:
+                print(ag.get("workspace_id", ""))
+                sys.exit(0)
+except Exception:
+    pass
+
+try:
+    out = subprocess.check_output(["herdr", "pane", "list"], stderr=subprocess.DEVNULL)
+    for p in (json.loads(out).get("result") or {}).get("panes") or []:
+        for key in ("cwd", "foreground_cwd"):
+            v = p.get(key, "")
+            if v and Path(v).resolve() == target_root:
+                print(p.get("workspace_id", ""))
+                sys.exit(0)
+except Exception:
+    pass
+PYFIND_WS
+    ) || true
+  fi
+
+  printf '\n🪓 [Sprout Prune]\n'
+  printf '   Worktree: %s\n' "$target_dir"
+  [[ -z "$branch" ]] || printf '   Branch:   %s\n' "$branch"
+  [[ -z "$ws_id" ]] || printf '   Herdr:    workspace %s will be closed\n' "$ws_id"
+  printf '   Actions:\n'
+  printf '     - remove worktree\n'
+  if [[ "$keep_branch" != "true" && -n "$branch" ]]; then
+    printf '     - delete local branch %s\n' "$branch"
+  fi
+  if [[ "$keep_remote" != "true" && "$remote_exists" == "true" ]]; then
+    printf '     - delete origin/%s\n' "$branch"
+  fi
+
+  if [[ "$do_yes" != "true" ]]; then
+    if [[ -t 0 ]]; then
+      local reply
+      read -r -p $'\nProceed? [y/N] ' reply
+      [[ "$reply" =~ ^[Yy]$ ]] || { printf 'Aborted.\n' >&2; exit 1; }
+    else
+      printf 'Error: refusing to prune without confirmation in a non-interactive shell. Re-run with --yes.\n' >&2
+      exit 1
+    fi
+  fi
+
+  if [[ -n "$ws_id" ]]; then
+    printf '\nClosing Herdr workspace %s...\n' "$ws_id"
+    herdr workspace close "$ws_id" >/dev/null 2>&1 || printf 'Warning: could not close Herdr workspace %s.\n' "$ws_id" >&2
+  fi
+
+  if [[ -n "$cur_root" && "$cur_root" == "$target_dir" ]]; then
+    printf '\nNote: your shell is inside the worktree being removed — after this finishes, run: cd %q\n' "$repo"
+  fi
+
+  printf '\nRemoving worktree %s...\n' "$target_dir"
+  if [[ "$do_force" == "true" ]]; then
+    git -C "$repo" worktree remove --force "$target_dir"
+  else
+    git -C "$repo" worktree remove "$target_dir"
+  fi
+  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+
+  if [[ "$keep_branch" != "true" && -n "$branch" ]]; then
+    printf 'Deleting local branch %s...\n' "$branch"
+    git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || printf 'Warning: could not delete local branch %s.\n' "$branch" >&2
+  fi
+
+  if [[ "$keep_remote" != "true" && "$remote_exists" == "true" ]]; then
+    printf 'Deleting origin/%s...\n' "$branch"
+    git -C "$repo" push origin --delete "$branch" >/dev/null 2>&1 || printf 'Warning: could not delete origin/%s.\n' "$branch" >&2
+  fi
+
+  printf '\n✓ Pruned %s.\n\n' "$target_dir"
+}
+
 if [[ "${1:-}" == "plant" ]]; then
   shift
   plant_repository "$@"
@@ -2827,6 +3070,12 @@ fi
 if [[ "${1:-}" == "sync" || "${1:-}" == "rebase" ]]; then
   shift
   sync_with_main_subcommand "$@"
+  exit 0
+fi
+
+if [[ "${1:-}" == "prune" ]]; then
+  shift
+  prune_worktree_subcommand "$@"
   exit 0
 fi
 

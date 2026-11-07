@@ -174,6 +174,41 @@ sprout check-review --recycle
    - 📋 **Resolution Plan**: Generates an ordered fix plan for developer approval before applying code changes.
 
 
+### Teardown (`sprout prune`)
+
+Once a task is done (merged, abandoned, or just no longer needed), `sprout prune` collapses the usual manual cleanup — closing the agent, closing the Herdr workspace, removing the worktree, and deleting both branches — into one command:
+
+```bash
+# Run from inside the worktree you want to tear down
+cd ~/workspace/csv_export
+sprout prune
+
+# Or target it by name/path from anywhere else
+sprout prune csv_export
+sprout prune ~/workspace/csv_export --yes
+
+# Only remove local state, keep the remote branch
+sprout prune --keep-remote
+
+# Discard uncommitted or unpushed work instead of being blocked
+sprout prune --force
+```
+
+**What it does:**
+1. Refuses to run on the base repository checkout, and refuses to proceed if the worktree has uncommitted changes or commits that were never pushed — unless `--force` is passed.
+2. Locates the Herdr workspace backing the worktree (by matching pane/agent `cwd`) and closes it.
+3. Removes the Git worktree (`git worktree remove`) and prunes stale worktree metadata.
+4. Deletes the local branch and, if it exists on `origin`, the remote branch too.
+
+| Option | Description |
+| :--- | :--- |
+| `TARGET` | Worktree path, feature/directory name, or branch to prune (defaults to the current worktree). |
+| `-y, --yes` | Skip the confirmation prompt. |
+| `--force` | Remove the worktree despite uncommitted/unpushed changes, and force-delete the branch. |
+| `--keep-branch` | Do not delete the local Git branch. |
+| `--keep-remote` | Do not delete the matching branch on `origin`. |
+| `--no-herdr` | Do not close the associated Herdr workspace. |
+
 ### Worktree Creation
 
 ```bash
