@@ -144,7 +144,33 @@ sprout session watch --stop
 3. Relaunches a fresh session in the same pane with a clean context window (~3k tokens).
 4. Submits an automatic warm-start prompt instructing the agent to resume seamlessly from `.sprout/handoff.md`.
 
-The **Sentinel Watcher** (`sprout session watch --daemon`) monitors file size on disk (`transcript.jsonl`) and scrollback lines without consuming any LLM tokens. When sessions exceed the threshold (120KB), it automatically triggers the handoff cycle while you focus on other work.
+The **Sentinel Watcher** (`sprout session watch --daemon`) monitors file size on disk (`transcript.jsonl`) and scrollback lines without consuming any LLM tokens. When sessions exceed the threshold (1500KB), it automatically triggers the handoff cycle while you focus on other work.
+
+### Pull Request Code Review Triage (`sprout check-review`)
+
+Once code is pushed and a pull request is created on GitHub, reviewers leave top-level summaries, discussion comments, and line-by-line diff annotations. Sprout closes the development feedback loop with `sprout check-review` (alias: `sprout review`):
+
+```bash
+# Inside an active worktree: automatically resolves current branch and its open PR
+sprout check-review
+
+# Target a specific PR by number or GitHub URL from anywhere:
+sprout check-review 58
+sprout check-review https://github.com/my-org/finance_tool/pull/58
+
+# Optional: clean context before review triage
+sprout check-review --recycle
+```
+
+**What it does (100% Deterministic, Zero Duplicate Workspaces):**
+1. **GitHub CLI Ingestion (`gh`):** Fetches PR metadata, review verdicts (`CHANGES_REQUESTED`, `APPROVED`), general discussion comments, and inline code comments (`path`, `line`, `diff_hunk`).
+2. **Review Dossier:** Consolidates all feedback into `.sprout/review.md` and `.sprout/review.json` grouped cleanly by file and line number.
+3. **Herdr Workspace Re-use:** Locates the existing Herdr workspace and pane for that worktree, focusing it rather than spawning duplicate windows or agent sessions.
+4. **BMad Review Triage Kickoff:** Automatically submits the BMad Review Triage prompt instructing the agent to act as a senior technical lead:
+   - 🔴 **[Must Fix / Bloqueante]**: Critical fixes required for immediate PR approval.
+   - 🟡 **[Opcional / Sugestão Rápida]**: Low-effort cosmetic or readability suggestions.
+   - 🔵 **[Fora de Escopo / Split]**: Out-of-scope feature requests or large architectural expansions (*scope creep*) that should be split into new backlog issues.
+   - 📋 **Resolution Plan**: Generates an ordered fix plan for developer approval before applying code changes.
 
 
 ### Worktree Creation

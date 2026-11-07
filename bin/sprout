@@ -16,12 +16,16 @@ Usage:
   sprout init
   sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
+  sprout check-review [PR_NUMBER_OR_URL] [options]
   sprout <type> [TEXT | --context <TEXT>] [options]
   sprout <type> (--issue <ISSUE-KEY> | --feature <name>) [options]
 
 Tree Planting & Initialization:
   sprout plant [URL|PATH|SPEC] [DIR] [options] Plant base repo from Git URL, local path, or spec doc (.md/.html)
   sprout init                                  Interactive initialization inside an existing base repository
+
+Code Review Ingestion & Triage:
+  sprout check-review [PR|URL]                 Ingest PR feedback & inline comments and trigger BMad Triage (alias: review)
 
 Session Management & Autonomous Watcher:
   sprout session status                        View active agent session, pane, context metrics, and watcher state
@@ -878,6 +882,427 @@ else:
 PYAGENT
 }
 
+check_review_subcommand() {
+  local pr_arg=""
+  local no_prompt=false
+  local do_recycle=false
+  local repo_override=""
+  local pane_override=""
+
+  while (($#)); do
+    case "$1" in
+      --no-prompt)
+        no_prompt=true
+        shift
+        ;;
+      --recycle)
+        do_recycle=true
+        shift
+        ;;
+      --repo)
+        (($# >= 2)) || { printf 'Missing value for --repo\n' >&2; exit 2; }
+        repo_override="$2"
+        shift 2
+        ;;
+      --pane)
+        (($# >= 2)) || { printf 'Missing value for --pane\n' >&2; exit 2; }
+        pane_override="$2"
+        shift 2
+        ;;
+      -h|--help)
+        cat >&2 <<'HELPREVIEW'
+Usage:
+  sprout check-review [PR_NUMBER_OR_URL] [options]
+  sprout review [PR_NUMBER_OR_URL] [options]
+
+Options:
+  --no-prompt      Download and snapshot PR review without submitting prompt to agent
+  --recycle        Snapshot state and recycle agent session with clean context before review triage
+  --repo REPO      Explicit GitHub repository (e.g. owner/repo)
+  --pane PANE_ID   Explicit Herdr pane ID override
+  -h, --help       Show this help
+
+Examples:
+  # Inside an active worktree with an open PR on current branch:
+  sprout check-review
+
+  # Specify PR number or GitHub PR URL:
+  sprout check-review 58
+  sprout check-review https://github.com/my-org/finance_tool/pull/58
+
+  # Recycle bloated context before review triage:
+  sprout check-review --recycle
+HELPREVIEW
+        exit 0
+        ;;
+      -*)
+        printf 'Unknown option for check-review: %s\n' "$1" >&2
+        exit 2
+        ;;
+      *)
+        if [[ -z "$pr_arg" ]]; then
+          pr_arg="$1"
+          shift
+        else
+          printf 'Unexpected argument: %s\n' "$1" >&2
+          exit 2
+        fi
+        ;;
+    esac
+  done
+
+  command -v gh >/dev/null 2>&1 || {
+    printf 'Error: GitHub CLI (gh) is required for sprout check-review.\nInstall it or visit https://cli.github.com\n' >&2
+    exit 1
+  }
+
+  local cur_dir
+  cur_dir=$(pwd -P)
+  local cur_git_root=""
+  cur_git_root=$(git -C "$cur_dir" rev-parse --show-toplevel 2>/dev/null || true)
+  local cur_branch=""
+  if [[ -n "$cur_git_root" ]]; then
+    cur_branch=$(git -C "$cur_dir" branch --show-current 2>/dev/null || true)
+  fi
+
+  printf '\n🔍 [Sprout PR Review Ingestion]\n'
+
+  local gh_view_args=()
+  if [[ -n "$repo_override" ]]; then
+    gh_view_args+=(--repo "$repo_override")
+  fi
+
+  if [[ -n "$pr_arg" ]]; then
+    gh_view_args+=("$pr_arg")
+  fi
+
+  local pr_fields="number,title,url,state,headRefName,baseRefName,body,reviews,comments,headRepositoryOwner,headRepository,reviewDecision"
+  local pr_json
+  if ! pr_json=$(gh pr view "${gh_view_args[@]}" --json "$pr_fields" 2>&1); then
+    printf 'Error retrieving PR from GitHub:\n%s\n' "$pr_json" >&2
+    exit 1
+  fi
+
+  local pr_meta
+  pr_meta=$(python3 - "$pr_json" <<'PYMETA'
+import json, sys
+raw = sys.argv[1]
+idx = raw.find("{")
+data = json.loads(raw[idx:] if idx != -1 else raw)
+num = data.get("number", "")
+title = data.get("title", "")
+head = data.get("headRefName", "")
+base = data.get("baseRefName", "")
+repo = (data.get("headRepository") or {}).get("nameWithOwner") or ""
+if not repo:
+    owner = (data.get("headRepositoryOwner") or {}).get("login") or ""
+    name = (data.get("headRepository") or {}).get("name") or ""
+    if owner and name:
+        repo = f"{owner}/{name}"
+decision = data.get("reviewDecision") or "PENDING"
+state = data.get("state") or "OPEN"
+print(f"{num}\t{title}\t{head}\t{base}\t{repo}\t{decision}\t{state}")
+PYMETA
+  )
+
+  local pr_number pr_title pr_head pr_base pr_repo pr_decision pr_state
+  pr_number=$(awk -F'\t' '{print $1}' <<< "$pr_meta")
+  pr_title=$(awk -F'\t' '{print $2}' <<< "$pr_meta")
+  pr_head=$(awk -F'\t' '{print $3}' <<< "$pr_meta")
+  pr_base=$(awk -F'\t' '{print $4}' <<< "$pr_meta")
+  pr_repo=$(awk -F'\t' '{print $5}' <<< "$pr_meta")
+  pr_decision=$(awk -F'\t' '{print $6}' <<< "$pr_meta")
+  pr_state=$(awk -F'\t' '{print $7}' <<< "$pr_meta")
+
+  printf '   PR:            #%s — %s\n' "$pr_number" "$pr_title"
+  printf '   Branch:        %s ➔ %s (%s)\n' "$pr_head" "$pr_base" "$pr_state"
+  printf '   Decision:      %s\n' "$pr_decision"
+
+  # Locate matching worktree
+  local target_worktree=""
+  if [[ -n "$cur_git_root" && "$cur_branch" == "$pr_head" ]]; then
+    target_worktree="$cur_git_root"
+  else
+    target_worktree=$(python3 - "$pr_head" "$pr_repo" "$cur_git_root" <<'PYLOCATE_WT'
+import json, subprocess, sys
+from pathlib import Path
+
+pr_head = sys.argv[1].strip()
+pr_repo = sys.argv[2].strip()
+cur_root = sys.argv[3].strip()
+slug = pr_head.split("/")[-1]
+repo_name = pr_repo.split("/")[-1] if "/" in pr_repo else pr_repo
+
+target = None
+
+# 1. Check Herdr agents cwd
+try:
+    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+    for ag in (json.loads(out).get("result") or {}).get("agents") or []:
+        cwd = Path(ag.get("cwd") or "")
+        if cwd.name == slug or cwd.name.lower() == slug.lower() or cwd.name.replace("-", "_") == slug.replace("-", "_"):
+            if cwd.is_dir():
+                target = str(cwd.resolve())
+                break
+except Exception:
+    pass
+
+# 2. Check base repository worktree list
+if not target:
+    candidates = []
+    if cur_root:
+        candidates.append(Path(cur_root))
+    if repo_name:
+        candidates.append(Path.home() / "workspace" / repo_name)
+        candidates.append(Path.cwd().parent / repo_name)
+    for b in candidates:
+        if b.is_dir():
+            wt_out = subprocess.getoutput(f"git -C '{b}' worktree list 2>/dev/null")
+            for line in wt_out.splitlines():
+                if f"[{pr_head}]" in line:
+                    p = Path(line.split()[0])
+                    if p.is_dir():
+                        target = str(p.resolve())
+                        break
+        if target:
+            break
+
+# 3. Check standard workspace sibling directory
+if not target:
+    for base in [Path.home() / "workspace", Path.cwd().parent]:
+        cand = base / slug
+        if cand.is_dir() and (cand / ".git").exists():
+            target = str(cand.resolve())
+            break
+
+if target:
+    print(target)
+PYLOCATE_WT
+    )
+  fi
+
+  if [[ -z "$target_worktree" || ! -d "$target_worktree" ]]; then
+    if [[ -n "$cur_git_root" ]]; then
+      target_worktree="$cur_git_root"
+    else
+      printf 'Error: Could not locate local worktree for branch %s.\n' "$pr_head" >&2
+      exit 1
+    fi
+  fi
+
+  printf '   Worktree:      %s\n' "$target_worktree"
+
+  # Fetch inline code review comments via gh api
+  local inline_json="[]"
+  if [[ -n "$pr_repo" ]]; then
+    inline_json=$(gh api "repos/$pr_repo/pulls/$pr_number/comments" 2>/dev/null || echo "[]")
+  fi
+
+  # Generate .sprout/review.json and .sprout/review.md
+  local sprout_dir="$target_worktree/.sprout"
+  mkdir -p "$sprout_dir"
+  ln -sfn .sprout "$target_worktree/.jdw" 2>/dev/null || true
+
+  local summary_stats
+  summary_stats=$(python3 - "$sprout_dir" "$pr_json" "$inline_json" <<'PYPARSE_REV'
+import json, sys
+from datetime import datetime
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+raw_pr = sys.argv[2]
+idx_pr = raw_pr.find("{")
+pr_data = json.loads(raw_pr[idx_pr:] if idx_pr != -1 else raw_pr)
+
+raw_inline = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else "[]"
+idx_inline = raw_inline.find("[")
+inline_data = json.loads(raw_inline[idx_inline:] if idx_inline != -1 else raw_inline) if idx_inline != -1 else []
+
+pr_num = pr_data.get("number", "")
+title = pr_data.get("title", "")
+url = pr_data.get("url", "")
+state = pr_data.get("state", "OPEN")
+decision = pr_data.get("reviewDecision") or "PENDING"
+head = pr_data.get("headRefName", "")
+base = pr_data.get("baseRefName", "")
+now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+reviews = pr_data.get("reviews") or []
+general_comments = pr_data.get("comments") or []
+
+review_model = {
+    "pr_number": pr_num,
+    "title": title,
+    "url": url,
+    "state": state,
+    "decision": decision,
+    "head_branch": head,
+    "base_branch": base,
+    "fetched_at": now_str,
+    "reviews_count": len(reviews),
+    "inline_comments_count": len(inline_data),
+    "general_comments_count": len(general_comments),
+    "reviews": reviews,
+    "inline_comments": inline_data,
+    "general_comments": general_comments
+}
+
+with open(out_dir / "review.json", "w", encoding="utf-8") as f:
+    json.dump(review_model, f, indent=2, ensure_ascii=False)
+
+lines = []
+lines.append(f"# 🔍 Code Review: PR #{pr_num} — {title}\n")
+lines.append(f"- **Pull Request:** [{pr_num}]({url})")
+lines.append(f"- **Branch:** `{head}` ➔ `{base}`")
+lines.append(f"- **Review Decision:** **{decision}** ({state})")
+lines.append(f"- **Snapshot Timestamp:** {now_str}\n")
+lines.append("---\n")
+
+lines.append("## 📊 Summary of Feedback")
+lines.append(f"- **Formal Reviews:** {len(reviews)}")
+lines.append(f"- **Inline Code Comments:** {len(inline_data)}")
+lines.append(f"- **General Discussion Comments:** {len(general_comments)}\n")
+lines.append("---\n")
+
+if inline_data:
+    lines.append("## 📝 Inline Code Review Comments\n")
+    by_file = {}
+    for c in inline_data:
+        path = c.get("path", "General")
+        by_file.setdefault(path, []).append(c)
+
+    for path, comments in by_file.items():
+        lines.append(f"### 📄 `{path}`\n")
+        for c in comments:
+            line_no = c.get("line") or c.get("original_line") or "Diff"
+            author = (c.get("user") or {}).get("login", "reviewer")
+            body = (c.get("body") or "").strip()
+            diff_hunk = (c.get("diff_hunk") or "").strip()
+            comment_url = c.get("html_url", "")
+            
+            hdr = f"#### Line {line_no} — @{author}"
+            if comment_url:
+                hdr += f" ([link]({comment_url}))"
+            lines.append(hdr + "\n")
+            lines.append(f"> {body}\n")
+            if diff_hunk:
+                lines.append("```diff")
+                lines.append(diff_hunk)
+                lines.append("```\n")
+    lines.append("---\n")
+
+if reviews:
+    lines.append("## 💬 Top-Level Reviews & Verdicts\n")
+    for r in reviews:
+        author = (r.get("author") or {}).get("login", "reviewer")
+        r_state = r.get("state", "COMMENTED")
+        body = (r.get("body") or "").strip()
+        lines.append(f"- **@{author}** (`{r_state}`)")
+        if body:
+            lines.append(f"  > {body}\n")
+    lines.append("---\n")
+
+if general_comments:
+    lines.append("## 💬 General PR Discussion\n")
+    for g in general_comments:
+        author = (g.get("author") or {}).get("login", "commenter")
+        body = (g.get("body") or "").strip()
+        created = g.get("createdAt", "")
+        lines.append(f"- **@{author}** ({created}):")
+        if body:
+            lines.append(f"  > {body}\n")
+    lines.append("---\n")
+
+lines.append("## 🎯 BMad Review Triage Protocol")
+lines.append("1. **🔴 [Must Fix / Bloqueante]**: Correções indispensáveis para aprovação e merge deste PR.")
+lines.append("2. **🟡 [Opcional / Sugestão Rápida]**: Melhorias cosméticas ou de legibilidade de baixo esforço.")
+lines.append("3. **🔵 [Fora de Escopo / Split]**: Mudanças com escopo expandido que NÃO devem bloquear este PR e devem ser separadas para novas issues no backlog.\n")
+
+with open(out_dir / "review.md", "w", encoding="utf-8") as f:
+    f.write("\n".join(lines))
+
+print(f"{len(reviews)}\t{len(inline_data)}\t{len(general_comments)}")
+PYPARSE_REV
+  )
+
+  local rev_count inline_count comm_count
+  rev_count=$(awk -F'\t' '{print $1}' <<< "$summary_stats")
+  inline_count=$(awk -F'\t' '{print $2}' <<< "$summary_stats")
+  comm_count=$(awk -F'\t' '{print $3}' <<< "$summary_stats")
+
+  printf '✓ Saved review snapshot to %s/.sprout/review.md and review.json\n' "$target_worktree"
+  printf '   (Feedback: %s top-level reviews, %s inline comments, %s general comments)\n' "$rev_count" "$inline_count" "$comm_count"
+
+  # Optional session recycling
+  if [[ "$do_recycle" == "true" ]]; then
+    printf '\nRecycling agent session for clean context window before review...\n'
+    (cd "$target_worktree" && manage_session_subcommand recycle ${pane_override:+--pane "$pane_override"})
+  fi
+
+  # Connect with Herdr without recreating workspaces
+  if [[ "$no_prompt" != "true" ]] && command -v herdr >/dev/null 2>&1; then
+    if herdr status client >/dev/null 2>&1; then
+      local agent_info
+      agent_info=$(python3 - "$target_worktree" "${pane_override:-}" <<'PYAGENT_FIND'
+import json, subprocess, sys
+from pathlib import Path
+
+target_root = Path(sys.argv[1]).resolve()
+pane_ovr = sys.argv[2].strip()
+
+try:
+    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+    agents = (json.loads(out).get("result") or {}).get("agents") or []
+    for ag in agents:
+        if pane_ovr and ag.get("pane_id") == pane_ovr:
+            print(f"{ag.get('name') or ag.get('agent')}\t{ag.get('pane_id')}\t{ag.get('workspace_id', '')}")
+            sys.exit(0)
+        ag_cwd = Path(ag.get("cwd", "")).resolve()
+        fg_cwd = Path(ag.get("foreground_cwd", "")).resolve()
+        if ag_cwd == target_root or fg_cwd == target_root:
+            print(f"{ag.get('name') or ag.get('agent')}\t{ag.get('pane_id')}\t{ag.get('workspace_id', '')}")
+            sys.exit(0)
+except Exception:
+    pass
+sys.exit(1)
+PYAGENT_FIND
+      ) || true
+
+      if [[ -n "$agent_info" ]]; then
+        local ag_name ag_pane ag_ws
+        ag_name=$(awk -F'\t' '{print $1}' <<< "$agent_info")
+        ag_pane=$(awk -F'\t' '{print $2}' <<< "$agent_info")
+        ag_ws=$(awk -F'\t' '{print $3}' <<< "$agent_info")
+
+        if [[ -n "$ag_ws" ]]; then
+          herdr workspace focus "$ag_ws" >/dev/null 2>&1 || true
+        fi
+
+        local bmad_prompt="BMad, o PR #$pr_number ($pr_title) recebeu apontamentos de code review consolidados em .sprout/review.md.
+
+Execute o protocolo BMad de Review Triage:
+1. 🎯 Avaliação Crítica: Analise a procedência técnica e arquitetural de cada apontamento dos revisores.
+2. 🏷️ Categorização dos Itens:
+   - 🔴 [Must Fix / Bloqueante]: Ajustes necessários para aprovação e merge deste PR.
+   - 🟡 [Opcional / Sugestão Rápida]: Melhorias simples ou cosméticas de baixo esforço.
+   - 🔵 [Fora de Escopo / Split]: Sugestões com escopo expandido que NÃO devem bloquear este PR e devem ser separadas para uma nova issue/feature no backlog.
+3. 📋 Plano de Resolução: Apresente o plano ordenado de correção dos itens 🔴 e 🟡 e peça confirmação do desenvolvedor antes de iniciar as alterações no código."
+
+        printf '\nSubmitting BMad Review Triage prompt to %s in Herdr pane %s...\n' "$ag_name" "$ag_pane"
+        if herdr agent prompt "$ag_pane" "$bmad_prompt" >/dev/null 2>&1 || herdr agent prompt "$ag_name" "$bmad_prompt" >/dev/null 2>&1; then
+          printf '✓ Prompt delivered to %s in Herdr pane %s. Review dossier is ready in %s/.sprout/review.md\n' "$ag_name" "$ag_pane" "$target_worktree"
+        else
+          printf 'Note: agent prompt submission did not complete. Pane %s is focused for manual input.\n' "$ag_pane" >&2
+        fi
+      else
+        printf '\nNo active agent detected in Herdr for %s.\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree" "$target_worktree"
+      fi
+    fi
+  else
+    printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree"
+  fi
+}
+
 configure_jira() {
   local target_auth="$HOME/.sprout/auth.toml"
   python3 - "$target_auth" <<'PYCONFIG'
@@ -1542,6 +1967,12 @@ fi
 if [[ "${1:-}" == "agent" ]]; then
   shift
   manage_agent_subcommand "$@"
+  exit 0
+fi
+
+if [[ "${1:-}" == "check-review" || "${1:-}" == "review" ]]; then
+  shift
+  check_review_subcommand "$@"
   exit 0
 fi
 
