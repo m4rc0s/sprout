@@ -140,9 +140,10 @@ sprout session watch --stop
 
 `sprout session recycle`:
 1. Snapshots git diffs, changed files, recent commits, and issue context into `.sprout/handoff.md`.
-2. Cleanly terminates the bloated agent process in Herdr (handling interactive shells without `agent_pane_busy` errors).
-3. Relaunches a fresh session in the same pane with a clean context window (~3k tokens).
-4. Submits an automatic warm-start prompt instructing the agent to resume seamlessly from `.sprout/handoff.md`.
+2. Cleanly terminates any bloated agent process in Herdr (handling interactive shells without `agent_pane_busy` errors).
+3. **Auto-Spawn / Respawn Fallback**: If the agent process was already terminated, closed, or the Herdr workspace was not yet created, Sprout automatically locates the existing pane (or instantiates a workspace) and launches a fresh agent session.
+4. Relaunches a fresh session in the pane with a clean context window (~3k tokens) restoring configuration from `.sprout/session.json`.
+5. Submits an automatic warm-start prompt instructing the agent to resume seamlessly from `.sprout/handoff.md`.
 
 The **Sentinel Watcher** (`sprout session watch --daemon`) monitors file size on disk (`transcript.jsonl`) and scrollback lines without consuming any LLM tokens. When sessions exceed the threshold (1500KB), it automatically triggers the handoff cycle while you focus on other work.
 
@@ -165,7 +166,7 @@ sprout check-review --recycle
 **What it does (100% Deterministic, Zero Duplicate Workspaces):**
 1. **GitHub CLI Ingestion (`gh`):** Fetches PR metadata, review verdicts (`CHANGES_REQUESTED`, `APPROVED`), general discussion comments, and inline code comments (`path`, `line`, `diff_hunk`).
 2. **Review Dossier:** Consolidates all feedback into `.sprout/review.md` and `.sprout/review.json` grouped cleanly by file and line number.
-3. **Herdr Workspace Re-use:** Locates the existing Herdr workspace and pane for that worktree, focusing it rather than spawning duplicate windows or agent sessions.
+3. **Herdr Workspace & Auto-Spawn Re-use:** Locates the existing Herdr workspace and pane for that worktree, focusing it rather than spawning duplicate windows. If the agent session had ended or was closed, it automatically auto-spawns a fresh agent into the pane using `.sprout/session.json`.
 4. **BMad Review Triage Kickoff:** Automatically submits the BMad Review Triage prompt instructing the agent to act as a senior technical lead:
    - 🔴 **[Must Fix / Bloqueante]**: Critical fixes required for immediate PR approval.
    - 🟡 **[Opcional / Sugestão Rápida]**: Low-effort cosmetic or readability suggestions.

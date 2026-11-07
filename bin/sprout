@@ -165,7 +165,7 @@ HELPSESS
   fi
 
   python3 - "$worktree_root" "$subcmd" "$pane_override" "$agent_override" "$daemon_flag" "$stop_flag" "$status_flag" "$interval_sec" "$threshold_kb" "$config_dir" <<'PYSESSION'
-import sys, json, os, subprocess, time, signal
+import sys, json, os, subprocess, time, signal, re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -212,6 +212,34 @@ def find_agent_for_worktree(target_root, pane_ovr="", agent_ovr=""):
     except Exception:
         pass
     return None
+
+def find_pane_for_worktree(target_root, pane_ovr=""):
+    try:
+        out = subprocess.check_output(["herdr", "pane", "list"], stderr=subprocess.DEVNULL)
+        panes = (json.loads(out).get("result") or {}).get("panes") or []
+        panes.sort(key=lambda x: (0 if str(x.get("pane_id", "")).endswith(":p1") else 1))
+        for p in panes:
+            if pane_ovr and p.get("pane_id") == pane_ovr:
+                return p
+            p_cwd = Path(p.get("cwd", "")).resolve()
+            fg_cwd = Path(p.get("foreground_cwd", "")).resolve()
+            if p_cwd == target_root or fg_cwd == target_root:
+                return p
+    except Exception:
+        pass
+    return None
+
+def auto_spawn_workspace(target_root):
+    try:
+        label = target_root.name
+        out = subprocess.check_output(
+            ["herdr", "workspace", "create", "--cwd", str(target_root), "--label", label, "--focus"],
+            stderr=subprocess.DEVNULL
+        )
+        data = json.loads(out)
+        return (data.get("result", {}) or {}).get("root_pane", {}).get("pane_id")
+    except Exception:
+        return None
 
 def estimate_context_metrics(ag_info):
     if not ag_info:
@@ -310,7 +338,13 @@ if subcmd == "status":
         print(f"Session ID:        {sess_val}")
         print(f"Context Metrics:   ~{size_kb:.1f} KB (Scrollback: {scroll_lines} lines)")
     else:
-        print("Herdr Agent:       No active agent currently mapped to this worktree in Herdr.")
+        pane_info = find_pane_for_worktree(worktree_root, pane_override)
+        if pane_info:
+            p_id = pane_info.get("pane_id")
+            ws_id = pane_info.get("workspace_id")
+            print(f"Herdr Pane:        {p_id} (workspace: {ws_id}, shell ready for auto-spawn)")
+        else:
+            print("Herdr Agent:       No active agent or pane currently mapped to this worktree in Herdr.")
 
     if handoff_file.exists():
         mtime = datetime.fromtimestamp(handoff_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
@@ -321,16 +355,46 @@ if subcmd == "status":
 
 elif subcmd == "recycle":
     agent_info = find_agent_for_worktree(worktree_root, pane_override, agent_override)
-    if not agent_info:
-        print(f"Error: No active Herdr agent session detected for worktree {worktree_root}.\nProvide --pane <pane_id> or --agent <agent_name> if running from outside the worktree.", file=sys.stderr)
-        sys.exit(1)
+    pane_id = None
+    agent_kind = None
+    agent_name = None
+    is_respawn = False
 
-    pane_id = agent_info.get("pane_id")
-    agent_kind = agent_info.get("agent")
-    agent_name = agent_info.get("name") or f"agent-{worktree_root.name}"
+    if agent_info:
+        pane_id = agent_info.get("pane_id")
+        agent_kind = agent_info.get("agent")
+        agent_name = agent_info.get("name") or f"agent-{worktree_root.name.lower()}"
+    else:
+        is_respawn = True
+        print(f"ℹ️  No active running agent detected in Herdr for {worktree_root.name}.")
+        print("   Checking for existing Herdr pane or workspace...")
+        pane_info = find_pane_for_worktree(worktree_root, pane_override)
+        if pane_info:
+            pane_id = pane_info.get("pane_id")
+            ws_id = pane_info.get("workspace_id")
+            if ws_id:
+                try:
+                    subprocess.run(["herdr", "workspace", "focus", ws_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+            print(f"✓ Found existing Herdr pane {pane_id} for worktree.")
+        else:
+            print(f"✓ Creating fresh Herdr workspace for {worktree_root.name}...")
+            pane_id = auto_spawn_workspace(worktree_root)
+            if not pane_id:
+                print(f"Error: Could not locate or create a Herdr pane/workspace for {worktree_root}.\nPlease verify Herdr status.", file=sys.stderr)
+                sys.exit(1)
+            print(f"✓ Created Herdr workspace with root pane {pane_id}.")
 
-    print(f"\n🔄 Initiating Warm-Start Session Recycling for {worktree_root.name}...")
-    print(f"Target Agent: {agent_name} ({agent_kind}) in Pane: {pane_id}")
+    if not agent_name:
+        clean_name = re.sub(r'[^a-z0-9_-]', '', worktree_root.name.lower())[:30]
+        agent_name = agent_override or f"agent-{clean_name}"
+
+    if is_respawn:
+        print(f"\n🚀 Initiating Auto-Spawn / Respawn for {worktree_root.name} in Pane {pane_id}...")
+    else:
+        print(f"\n🔄 Initiating Warm-Start Session Recycling for {worktree_root.name}...")
+        print(f"Target Agent: {agent_name} ({agent_kind or 'unknown'}) in Pane: {pane_id}")
 
     # 1. Snapshot Git state
     git_status = subprocess.getoutput(f"git -C '{worktree_root}' status --short 2>/dev/null")
@@ -352,7 +416,7 @@ elif subcmd == "recycle":
 
 - **Timestamp:** {now_str}
 - **Worktree:** `{worktree_root.name}`
-- **Previous Agent:** `{agent_name}` ({agent_kind})
+- **Agent:** `{agent_name}` ({agent_kind or 'auto-spawn'})
 - **Herdr Pane:** `{pane_id}`
 
 ---
@@ -391,24 +455,57 @@ elif subcmd == "recycle":
 
     print(f"✓ State snapshot safely persisted to {handoff_file}")
 
-    # 3. Gracefully stop previous agent process
-    print("✓ Terminating bloated agent session in Herdr...")
+    # 3. Gracefully stop previous agent process or reset pane prompt
+    if is_respawn:
+        print("✓ Ensuring Herdr pane is ready at shell prompt...")
+    else:
+        print("✓ Terminating bloated agent session in Herdr...")
     terminate_agent_in_pane(pane_id)
     time.sleep(0.5)
 
-    # 4. Spawn clean agent
-    print(f"✓ Starting fresh {agent_kind} session in pane {pane_id} with pristine context...")
+    # 4. Resolve session configuration
     target_model = ""
     target_effort = ""
+    saved_agent = ""
     sess_meta_file = sprout_dir / "session.json"
     if sess_meta_file.exists():
         try:
             s_meta = json.loads(sess_meta_file.read_text(encoding="utf-8"))
+            saved_agent = s_meta.get("agent", "")
             target_model = s_meta.get("model", "")
             target_effort = s_meta.get("effort", "")
         except Exception:
             pass
 
+    if agent_override:
+        agent_kind = agent_override
+    elif not agent_kind:
+        agent_kind = saved_agent or "agy"
+
+    if not target_model:
+        if agent_kind == "agy":
+            target_model = "gemini-4-argon"
+        elif agent_kind == "claude":
+            target_model = "opus"
+        elif agent_kind == "codex":
+            target_model = "gpt-6-luna"
+
+    if not target_effort:
+        target_effort = "high"
+
+    # Persist session.json
+    try:
+        sess_meta_file.write_text(json.dumps({
+            "agent": agent_kind,
+            "tier": "frontier",
+            "model": target_model,
+            "effort": target_effort
+        }, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    # 5. Spawn clean agent
+    print(f"✓ Starting fresh {agent_kind} session in pane {pane_id} (model: {target_model})...")
     extra_args = []
     if agent_kind == "agy":
         extra_args = ["--", "--new-project", "--project", worktree_root.name]
@@ -435,15 +532,19 @@ elif subcmd == "recycle":
 
     time.sleep(1.5)
 
-    # 5. Send warm-start prompt
+    # 6. Send warm-start prompt
     handoff_prompt = "BMad/Sprout: Sessão reiniciada com contexto limpo. Leia o snapshot de handoff em .sprout/handoff.md e continue o trabalho a partir do ponto atual."
     try:
-        subprocess.run(["herdr", "agent", "prompt", agent_name, handoff_prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if subprocess.run(["herdr", "agent", "prompt", pane_id, handoff_prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            subprocess.run(["herdr", "agent", "prompt", agent_name, handoff_prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print("✓ Sent warm-start handoff prompt to fresh agent session.")
     except Exception:
         pass
 
-    print("\n✨ Session recycled successfully! Context window has been reset with full memory preserved.\n")
+    if is_respawn:
+        print(f"\n✨ Agent session auto-spawned successfully in Herdr pane {pane_id}! Full context preserved in handoff.md.\n")
+    else:
+        print("\n✨ Session recycled successfully! Context window has been reset with full memory preserved.\n")
 
 elif subcmd == "watch":
     if stop_flag:
@@ -1250,29 +1351,64 @@ from pathlib import Path
 target_root = Path(sys.argv[1]).resolve()
 pane_ovr = sys.argv[2].strip()
 
+# 1. Search for active agent in herdr agent list
 try:
     out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
     agents = (json.loads(out).get("result") or {}).get("agents") or []
     for ag in agents:
         if pane_ovr and ag.get("pane_id") == pane_ovr:
-            print(f"{ag.get('name') or ag.get('agent')}\t{ag.get('pane_id')}\t{ag.get('workspace_id', '')}")
+            print(f"{ag.get('name') or ag.get('agent')}\t{ag.get('pane_id')}\t{ag.get('workspace_id', '')}\tactive")
             sys.exit(0)
         ag_cwd = Path(ag.get("cwd", "")).resolve()
         fg_cwd = Path(ag.get("foreground_cwd", "")).resolve()
         if ag_cwd == target_root or fg_cwd == target_root:
-            print(f"{ag.get('name') or ag.get('agent')}\t{ag.get('pane_id')}\t{ag.get('workspace_id', '')}")
+            print(f"{ag.get('name') or ag.get('agent')}\t{ag.get('pane_id')}\t{ag.get('workspace_id', '')}\tactive")
             sys.exit(0)
 except Exception:
     pass
+
+# 2. Search for existing pane in herdr pane list
+try:
+    p_out = subprocess.check_output(["herdr", "pane", "list"], stderr=subprocess.DEVNULL)
+    panes = (json.loads(p_out).get("result") or {}).get("panes") or []
+    panes.sort(key=lambda x: (0 if str(x.get("pane_id", "")).endswith(":p1") else 1))
+    for p in panes:
+        if pane_ovr and p.get("pane_id") == pane_ovr:
+            print(f"agent-{target_root.name.lower()}\t{p.get('pane_id')}\t{p.get('workspace_id', '')}\tpane_found")
+            sys.exit(0)
+        p_cwd = Path(p.get("cwd", "")).resolve()
+        fg_cwd = Path(p.get("foreground_cwd", "")).resolve()
+        if p_cwd == target_root or fg_cwd == target_root:
+            print(f"agent-{target_root.name.lower()}\t{p.get('pane_id')}\t{p.get('workspace_id', '')}\tpane_found")
+            sys.exit(0)
+except Exception:
+    pass
+
+# 3. Create fresh workspace
+try:
+    ws_out = subprocess.check_output(
+        ["herdr", "workspace", "create", "--cwd", str(target_root), "--label", target_root.name, "--focus"],
+        stderr=subprocess.DEVNULL
+    )
+    ws_data = (json.loads(ws_out).get("result") or {})
+    new_pane_id = (ws_data.get("root_pane") or {}).get("pane_id", "")
+    new_ws_id = (ws_data.get("workspace") or {}).get("workspace_id", "")
+    if new_pane_id:
+        print(f"agent-{target_root.name.lower()}\t{new_pane_id}\t{new_ws_id}\tworkspace_created")
+        sys.exit(0)
+except Exception:
+    pass
+
 sys.exit(1)
 PYAGENT_FIND
       ) || true
 
       if [[ -n "$agent_info" ]]; then
-        local ag_name ag_pane ag_ws
+        local ag_name ag_pane ag_ws ag_state
         ag_name=$(awk -F'\t' '{print $1}' <<< "$agent_info")
         ag_pane=$(awk -F'\t' '{print $2}' <<< "$agent_info")
         ag_ws=$(awk -F'\t' '{print $3}' <<< "$agent_info")
+        ag_state=$(awk -F'\t' '{print $4}' <<< "$agent_info")
 
         if [[ -n "$ag_ws" ]]; then
           herdr workspace focus "$ag_ws" >/dev/null 2>&1 || true
@@ -1288,14 +1424,55 @@ Execute o protocolo BMad de Review Triage:
    - 🔵 [Fora de Escopo / Split]: Sugestões com escopo expandido que NÃO devem bloquear este PR e devem ser separadas para uma nova issue/feature no backlog.
 3. 📋 Plano de Resolução: Apresente o plano ordenado de correção dos itens 🔴 e 🟡 e peça confirmação do desenvolvedor antes de iniciar as alterações no código."
 
-        printf '\nSubmitting BMad Review Triage prompt to %s in Herdr pane %s...\n' "$ag_name" "$ag_pane"
+        if [[ "$ag_state" != "active" ]]; then
+          printf '\n🚀 Auto-spawning fresh agent in Herdr pane %s...\n' "$ag_pane"
+          herdr pane send-keys "$ag_pane" esc C-c C-c >/dev/null 2>&1 || true
+          sleep 0.5
+
+          local chosen_agent="agy" agent_model="gemini-4-argon" reasoning_effort="high"
+          local sess_json="$target_worktree/.sprout/session.json"
+          if [[ -f "$sess_json" ]]; then
+            chosen_agent=$(jq -r '.agent // "agy"' "$sess_json" 2>/dev/null || echo "agy")
+            agent_model=$(jq -r '.model // empty' "$sess_json" 2>/dev/null || true)
+            reasoning_effort=$(jq -r '.effort // "high"' "$sess_json" 2>/dev/null || echo "high")
+          fi
+          if [[ -z "$agent_model" ]]; then
+            case "$chosen_agent" in
+              agy) agent_model="gemini-4-argon" ;;
+              claude) agent_model="opus" ;;
+              codex) agent_model="gpt-6-luna" ;;
+            esac
+          fi
+
+          local safe_agent_name
+          safe_agent_name=$(printf 'agent-%s' "$(basename "$target_worktree")" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
+
+          local agent_extra_args=()
+          if [[ "$chosen_agent" == "agy" ]]; then
+            agent_extra_args=(-- --new-project --project "$(basename "$target_worktree")" --model "$agent_model" --effort "$reasoning_effort")
+          elif [[ "$chosen_agent" == "claude" ]]; then
+            agent_extra_args=(-- --model "$agent_model" --effort "$reasoning_effort")
+          elif [[ "$chosen_agent" == "codex" ]]; then
+            agent_extra_args=(-- --model "$agent_model")
+          fi
+
+          printf 'Starting %s (%s, model: %s) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$ag_pane"
+          if herdr agent start "$safe_agent_name" --kind "$chosen_agent" --pane "$ag_pane" "${agent_extra_args[@]}" 2>/dev/null; then
+            sleep 1.0
+            ag_name="$safe_agent_name"
+          else
+            printf 'Warning: Could not start agent automatically in pane %s. Pane is focused for manual interaction.\n' "$ag_pane" >&2
+          fi
+        fi
+
+        printf '\nSubmitting BMad Review Triage prompt to Herdr pane %s...\n' "$ag_pane"
         if herdr agent prompt "$ag_pane" "$bmad_prompt" >/dev/null 2>&1 || herdr agent prompt "$ag_name" "$bmad_prompt" >/dev/null 2>&1; then
-          printf '✓ Prompt delivered to %s in Herdr pane %s. Review dossier is ready in %s/.sprout/review.md\n' "$ag_name" "$ag_pane" "$target_worktree"
+          printf '✓ Prompt delivered to Herdr pane %s (%s). Review dossier is ready in %s/.sprout/review.md\n' "$ag_pane" "$ag_name" "$target_worktree"
         else
           printf 'Note: agent prompt submission did not complete. Pane %s is focused for manual input.\n' "$ag_pane" >&2
         fi
       else
-        printf '\nNo active agent detected in Herdr for %s.\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree" "$target_worktree"
+        printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree" "$target_worktree"
       fi
     fi
   else
