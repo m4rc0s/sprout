@@ -2,8 +2,8 @@
 
 `sprout autopilot` watches the worktrees of the current repository and reacts to
 GitHub pull-request events **without any LLM and without spending tokens**.
-It only wakes an agent when something needs it (idea borrowed from
-[firstmate](https://github.com/kunchenguid/firstmate)'s event-driven watcher).
+It only wakes an agent when something needs it, so the work keeps moving while
+you are away from the terminal.
 
 ## Commands
 
