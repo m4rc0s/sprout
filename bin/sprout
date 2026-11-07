@@ -774,7 +774,8 @@ if subcmd == "status":
         h_data = json.loads(out)
         for ag in (h_data.get("result") or {}).get("agents") or []:
             k = ag.get("agent")
-            if k:
+            st = (ag.get("agent_status") or "").lower()
+            if k and st in ("working", "busy"):
                 herdr_counts[k] = herdr_counts.get(k, 0) + 1
     except Exception:
         pass
@@ -1866,7 +1867,7 @@ summary=${summary:-$feature}
 
 # 1. Run the Weighted Semantic Complexity Engine & Headroom-First Smart Router
 status_file="$common_dir/sprout/agents_status.json"
-routing_resolution=$(python3 - "$type" "$summary" "${desc_plain:-}" "${issue_type:-}" "${priority:-}" "$status_file" "${agent_opt:-${default_agent:-auto}}" "${model_opt:-}" "${effort_opt:-}" "$project_config" <<'PYENGINE'
+routing_resolution=$(python3 - "$type" "$summary" "${desc_plain:-}" "${issue_type:-}" "${priority:-}" "$status_file" "${agent_opt:-}" "${default_agent:-auto}" "${model_opt:-}" "${effort_opt:-}" "$project_config" <<'PYENGINE'
 import sys, json, os, subprocess, tomllib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1878,9 +1879,10 @@ issue_type = sys.argv[4]
 priority = sys.argv[5]
 status_file = Path(sys.argv[6])
 cli_agent = sys.argv[7].strip()
-cli_model = sys.argv[8].strip()
-cli_effort = sys.argv[9].strip()
-config_file = Path(sys.argv[10])
+default_agent = sys.argv[8].strip()
+cli_model = sys.argv[9].strip()
+cli_effort = sys.argv[10].strip()
+config_file = Path(sys.argv[11])
 
 text = f"{task_type} {summary} {description}".lower()
 
@@ -1994,15 +1996,22 @@ try:
     h_data = json.loads(out)
     for ag in (h_data.get("result") or {}).get("agents") or []:
         k = ag.get("agent")
-        if k:
+        st = (ag.get("agent_status") or "").lower()
+        if k and st in ("working", "busy"):
             herdr_counts[k] = herdr_counts.get(k, 0) + 1
 except Exception:
     pass
 
-selected_agent = cli_agent
+selected_agent = ""
 agent_rationale = ""
 
-if not cli_agent or cli_agent == "auto":
+if cli_agent and cli_agent != "auto":
+    selected_agent = cli_agent
+    agent_rationale = f"Explicit override via -a {cli_agent}"
+elif default_agent and default_agent != "auto":
+    selected_agent = default_agent
+    agent_rationale = f"Project config default: {default_agent}"
+else:
     candidates = []
     for name, info in agents_data.items():
         cd = info.get("cooldown_until")
@@ -2035,8 +2044,6 @@ if not cli_agent or cli_agent == "auto":
     else:
         selected_agent = "claude"
         agent_rationale = "Fallback (all agents at capacity/cooldown)"
-else:
-    agent_rationale = f"Explicit override via -a {cli_agent}"
 
 # Update last_used
 if selected_agent in agents_data:
