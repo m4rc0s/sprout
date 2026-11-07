@@ -1111,6 +1111,19 @@ elif subcmd == "recycle":
             if target_model:
                 cmd_args += ["-m", target_model]
             cmd_args += [handoff_prompt]
+        # This script runs as `python3 - <<heredoc`, so fd 0 is the script pipe,
+        # not the terminal. Agent CLIs refuse to start without a TTY on stdin.
+        for std_fd, std_mode in ((0, os.O_RDWR), (1, os.O_RDWR), (2, os.O_RDWR)):
+            if os.isatty(std_fd):
+                continue
+            try:
+                tty_fd = os.open("/dev/tty", std_mode)
+                os.dup2(tty_fd, std_fd)
+                if tty_fd > 2:
+                    os.close(tty_fd)
+            except OSError:
+                print("Error: no controlling terminal available to launch the agent. Run 'sprout session recycle' from an interactive shell.", file=sys.stderr)
+                sys.exit(1)
         os.execvp(agent_kind, cmd_args)
 
     launch_cmd = ["herdr", "agent", "start", agent_name, "--kind", agent_kind, "--pane", pane_id] + extra_args
