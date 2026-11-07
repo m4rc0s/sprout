@@ -1900,10 +1900,8 @@ if general_comments:
             lines.append(f"  > {body}\n")
     lines.append("---\n")
 
-lines.append("## 🎯 BMad Review Triage Protocol")
-lines.append("1. **🔴 [Must Fix / Bloqueante]**: Correções indispensáveis para aprovação e merge deste PR.")
-lines.append("2. **🟡 [Opcional / Sugestão Rápida]**: Melhorias cosméticas ou de legibilidade de baixo esforço.")
-lines.append("3. **🔵 [Fora de Escopo / Split]**: Mudanças com escopo expandido que NÃO devem bloquear este PR e devem ser separadas para novas issues no backlog.\n")
+lines.append("## 🎯 Instrução")
+lines.append("Analise os apontamentos acima e proponha as correções necessárias de forma direta e objetiva.\n")
 
 with open(out_dir / "review.md", "w", encoding="utf-8") as f:
     f.write("\n".join(lines))
@@ -1943,7 +1941,7 @@ PYPARSE_REV
   fi
 
   local routing_res
-  routing_res=$(evaluate_agent_routing "review" "$pr_title" "$rev_text" "Review" "High" "$status_file" "${agent_override:-}" "auto" "${model_override:-}" "${effort_override:-}")
+  routing_res=$(evaluate_agent_routing "review" "$pr_title" "$rev_text" "Review" "Medium" "$status_file" "${agent_override:-}" "auto" "${model_override:-}" "${effort_override:-medium}")
 
   local chosen_agent model_tier agent_model reasoning_effort score_c signals_c score_u signals_u agent_rationale
   chosen_agent=$(awk -F'\t' '{print $1}' <<< "$routing_res")
@@ -1974,15 +1972,8 @@ PYPARSE_REV
 }
 EOF
 
-  local bmad_prompt="BMad, o PR #$pr_number ($pr_title) recebeu apontamentos de code review consolidados em .sprout/review.md.
-
-Execute o protocolo BMad de Review Triage:
-1. 🎯 Avaliação Crítica: Analise a procedência técnica e arquitetural de cada apontamento dos revisores.
-2. 🏷️ Categorização dos Itens:
-   - 🔴 [Must Fix / Bloqueante]: Ajustes necessários para aprovação e merge deste PR.
-   - 🟡 [Opcional / Sugestão Rápida]: Melhorias simples ou cosméticas de baixo esforço.
-   - 🔵 [Fora de Escopo / Split]: Sugestões com escopo expandido que NÃO devem bloquear este PR e devem ser separadas para uma nova issue/feature no backlog.
-3. 📋 Plano de Resolução: Apresente o plano ordenado de correção dos itens 🔴 e 🟡 e peça confirmação do desenvolvedor antes de iniciar as alterações no código."
+  local bmad_prompt="BMad, analise os apontamentos de review do PR #$pr_number em .sprout/review.md.
+Apresente de forma direta e objetiva o que precisa ser corrigido no código e aguarde confirmação para aplicar."
 
   if [[ "$no_prompt" == "true" ]]; then
     printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree"
