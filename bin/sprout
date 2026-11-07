@@ -2772,7 +2772,7 @@ sync_with_main_subcommand() {
     exit 1
   fi
 
-  local base_branch="main"
+  base_branch="main"
   if git -C "$target_root" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$target_root" show-ref --verify --quiet refs/remotes/origin/main; then
     base_branch="master"
   fi
@@ -3214,7 +3214,7 @@ if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
   printf 'Branch already exists: %s\n' "$branch" >&2
   exit 1
 fi
-  local base_branch="main"
+  base_branch="main"
   if git -C "$repo" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main; then
     base_branch="master"
   fi
@@ -3245,6 +3245,15 @@ fi
 
 mkdir -p "$target/.sprout"
 ln -sfn .sprout "$target/.jdw" 2>/dev/null || true
+cat > "$target/.sprout/session.json" <<EOF
+{
+  "agent": "$agent",
+  "tier": "$model_tier",
+  "model": "$model_name",
+  "effort": "$reasoning_effort",
+  "mode": "plan"
+}
+EOF
 
 # Generate normalized issue model (.sprout/issue.json and .sprout/issue.md)
 if [[ -n "$issue" && -n "$response_file" && -f "$response_file" ]]; then
