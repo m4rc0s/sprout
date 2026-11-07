@@ -3484,6 +3484,19 @@ fi
   git -C "$target" config branch."$branch".merge "refs/heads/$base_branch"
   git -C "$target" config branch."$branch".rebase true
   git -C "$target" config pull.rebase true
+
+  # `git worktree add` only checks out tracked files, so BMad's gitignored
+  # per-user config (e.g. the active initiative pointer in
+  # _bmad/custom/*.user.toml) is otherwise left behind in the base repo.
+  # Symlinked, not copied, so every worktree always reads the same live
+  # config as the base repo.
+  if [[ -d "$repo/_bmad/custom" ]]; then
+    while IFS= read -r -d '' bmad_user_file; do
+      bmad_rel=${bmad_user_file#"$repo"/}
+      mkdir -p "$target/$(dirname "$bmad_rel")"
+      ln -sfn "$bmad_user_file" "$target/$bmad_rel"
+    done < <(find "$repo/_bmad/custom" -name '*.user.toml' -print0 2>/dev/null)
+  fi
 [[ -z "$project_name" ]] || printf 'Project: %s\n' "$project_name"
 [[ -z "$github_repo" ]] || printf 'GitHub: %s\n' "$github_repo"
 if [[ -n "$issue" ]]; then
