@@ -33,10 +33,29 @@ cd sprout
 cp bin/sprout ~/.local/bin/sprout
 ```
 
-### 2. Initialize your project
+### 2. Plant the Tree or Initialize an Existing Repo
 
-Run `sprout init` from within your **canonical base Git repository**:
+**Option A: Plant from scratch in any clean directory (`sprout plant`)**
+If starting from an arbitrary directory without a pre-existing workspace, use `sprout plant` to clone from a Git repo OR bootstrap a brand new project from a specification document (Markdown/HTML) 100% deterministically with zero LLMs:
+```bash
+# 1. Bootstrap a brand new project from a Markdown product vision or PRD:
+sprout plant vision.md
+sprout plant specs/billing_prd.html ~/workspace/billing_service
 
+# 2. Plant from a remote repository:
+sprout plant git@github.com:my-org/finance_tool.git
+sprout plant https://github.com/my-org/finance_tool.git --branch develop
+
+# 3. Plant into a custom destination directory:
+sprout plant /path/to/existing/repo ~/workspace/finance_tool
+
+# 4. Seed an existing repository with a specification document:
+sprout plant git@github.com:my-org/finance_tool.git --spec specs/v2.md
+sprout plant --spec vision.md  # inside current repo
+```
+
+**Option B: Initialize inside an existing local repository (`sprout init`)**
+If you already have a canonical base repository cloned:
 ```bash
 cd ~/workspace/my-project
 sprout init
@@ -85,14 +104,132 @@ sprout agent reset claude
 sprout agent reset          # Resets all agents
 ```
 
+### Task-Type Based Model Routing
+
+Sprout automatically matches the Conventional Commit task type to calibrated model tiers, preserving expensive reasoning tokens for deep architectural work and using fast models for minor edits:
+
+| Task Type | Model Tier | Claude Code | Antigravity (`agy`) | OpenAI Codex |
+| :--- | :--- | :--- | :--- | :--- |
+| `feat`, `fix`, `refactor`, `perf`, `spike` | **Frontier** (Deep Reasoning) | `opus` | `gemini-4-argon` (high effort) | `gpt-6-luna` |
+| `test`, `build` | **Balanced** (Implementation) | `sonnet` | `gemini-4-argon` (medium effort) | `gpt-5.6-terra` |
+| `docs`, `chore`, `style`, `ci`, `revert` | **Fast** (Cost-Effective) | `haiku` | `gemini-3.8-flash` (low effort) | `gpt-reserve` |
+
+You can override the model explicitly at any time with `--model <name>`:
+```bash
+sprout feat --issue FT-123 --model opus --effort high
+```
+
+### Context Compaction & Autonomous Sentinel Watcher
+
+When an agent session runs for extended periods, the context window can balloon (>80k tokens), causing attention drift, slow response times, and instruction amnesia. Sprout provides zero-amnesia **Session Recycling** and a **100% Non-LLM Autonomous Watcher**:
+
+```bash
+# Check current session context, Herdr pane status, and watcher state
+sprout session status
+
+# Snapshot state to .sprout/handoff.md and restart agent with a fresh context window
+sprout session recycle
+
+# Run the autonomous sentinel watcher daemon in background
+sprout session watch --daemon
+
+# Check or stop the autonomous watcher
+sprout session watch --status
+sprout session watch --stop
+```
+
+`sprout session recycle`:
+1. Snapshots git diffs, changed files, recent commits, and issue context into `.sprout/handoff.md`.
+2. Cleanly terminates any bloated agent process in Herdr (handling interactive shells without `agent_pane_busy` errors).
+3. **Auto-Spawn / Respawn Fallback**: If the agent process was already terminated, closed, or the Herdr workspace was not yet created, Sprout automatically locates the existing pane (or instantiates a workspace) and launches a fresh agent session.
+4. Relaunches a fresh session in the pane with a clean context window (~3k tokens) restoring configuration from `.sprout/session.json`.
+5. Submits an automatic warm-start prompt instructing the agent to resume seamlessly from `.sprout/handoff.md`.
+
+The **Sentinel Watcher** (`sprout session watch --daemon`) monitors file size on disk (`transcript.jsonl`) and scrollback lines without consuming any LLM tokens. When sessions exceed the threshold (1500KB), it automatically triggers the handoff cycle while you focus on other work.
+
+### Pull Request Code Review Triage (`sprout check-review`)
+
+Once code is pushed and a pull request is created on GitHub, reviewers leave top-level summaries, discussion comments, and line-by-line diff annotations. Sprout closes the development feedback loop with `sprout check-review` (alias: `sprout review`):
+
+```bash
+# Inside an active worktree: automatically resolves current branch and its open PR
+sprout check-review
+
+# Target a specific PR by number or GitHub URL from anywhere:
+sprout check-review 58
+sprout check-review https://github.com/my-org/finance_tool/pull/58
+
+# Optional: clean context before review triage
+sprout check-review --recycle
+```
+
+**What it does (100% Deterministic, Zero Duplicate Workspaces):**
+1. **GitHub CLI Ingestion (`gh`):** Fetches PR metadata, review verdicts (`CHANGES_REQUESTED`, `APPROVED`), general discussion comments, and inline code comments (`path`, `line`, `diff_hunk`).
+2. **Review Dossier:** Consolidates all feedback into `.sprout/review.md` and `.sprout/review.json` grouped cleanly by file and line number.
+3. **Herdr Workspace & Auto-Spawn Re-use:** Locates the existing Herdr workspace and pane for that worktree, focusing it rather than spawning duplicate windows. If the agent session had ended or was closed, it automatically auto-spawns a fresh agent into the pane using `.sprout/session.json`.
+4. **BMad Review Triage Kickoff:** Automatically submits the BMad Review Triage prompt instructing the agent to act as a senior technical lead:
+   - 🔴 **[Must Fix / Bloqueante]**: Critical fixes required for immediate PR approval.
+   - 🟡 **[Opcional / Sugestão Rápida]**: Low-effort cosmetic or readability suggestions.
+   - 🔵 **[Fora de Escopo / Split]**: Out-of-scope feature requests or large architectural expansions (*scope creep*) that should be split into new backlog issues.
+   - 📋 **Resolution Plan**: Generates an ordered fix plan for developer approval before applying code changes.
+
+
+### Teardown (`sprout prune`)
+
+Once a task is done (merged, abandoned, or just no longer needed), `sprout prune` collapses the usual manual cleanup — closing the agent, closing the Herdr workspace, removing the worktree, and deleting both branches — into one command:
+
+```bash
+# Run from inside the worktree you want to tear down
+cd ~/workspace/csv_export
+sprout prune
+
+# Or target it by name/path from anywhere else
+sprout prune csv_export
+sprout prune ~/workspace/csv_export --yes
+
+# Only remove local state, keep the remote branch
+sprout prune --keep-remote
+
+# Discard uncommitted or unpushed work instead of being blocked
+sprout prune --force
+```
+
+**What it does:**
+1. Refuses to run on the base repository checkout, and refuses to proceed if the worktree has uncommitted changes or commits that were never pushed — unless `--force` is passed.
+2. Locates the Herdr workspace backing the worktree (by matching pane/agent `cwd`) and closes it.
+3. Removes the Git worktree (`git worktree remove`) and prunes stale worktree metadata.
+4. Deletes the local branch and, if it exists on `origin`, the remote branch too.
+
+| Option | Description |
+| :--- | :--- |
+| `TARGET` | Worktree path, feature/directory name, or branch to prune (defaults to the current worktree). |
+| `-y, --yes` | Skip the confirmation prompt. |
+| `--force` | Remove the worktree despite uncommitted/unpushed changes, and force-delete the branch. |
+| `--keep-branch` | Do not delete the local Git branch. |
+| `--keep-remote` | Do not delete the matching branch on `origin`. |
+| `--no-herdr` | Do not close the associated Herdr workspace. |
+
 ### Worktree Creation
 
 ```bash
-# Smart Router workflow (picks the least saturated agent not in cooldown)
+# Free-form text workflow (bypasses Jira; automatically derives branch slug & scores complexity)
+sprout feat "Adicionar exportação CSV no relatório de vendas"
+
+# Bug fix with urgent keyword -> automatically scores Frontier tier and High reasoning effort
+sprout fix "Deadlock no pool de conexões do postgres" --agent agy
+
+# Provide free-form context via flag or file
+sprout feat -c "Refatorar camada de autenticação para JWT stateless"
+sprout feat --context-file specs/auth.md
+
+# Jira-backed workflow (fetches summary, description, and metadata from Jira Cloud)
 sprout fix --issue FT-123
 
-# Explicitly override the agent selection
-sprout feat --issue FT-456 --agent agy
+# Fast-tier routing: automatically dispatches lightweight model (e.g. Haiku / Flash)
+sprout docs "Atualizar guia de onboarding e setup inicial"
+
+# Explicitly override the agent selection and model
+sprout feat --issue FT-456 --agent agy --model gemini-4-argon
 
 # Combine a specific agent with the SCPE methodology
 sprout feat --issue FT-456 -a agy -m scpe
@@ -115,11 +252,16 @@ sprout chore --feature cleanup_logs --slug prune_old_entries
 | Option | Short | Description |
 | :--- | :--- | :--- |
 | `<type>` | — | Positional Conventional Commit type (`feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). |
+| `[TEXT]` | — | Optional positional free-form task description (bypasses Jira; automatically generates branch slug). |
+| `--context <TEXT>`| `-c` | Free-form task context (use `-` to read from stdin). |
+| `--context-file <FILE>`| — | Read task context from a markdown or text file. |
 | `--issue <KEY>` | — | Issue key (e.g. `FT-123`). Fetches details, derives branch slug, and creates `.sprout/issue.json`. |
 | `--agent <NAME>` | `-a` | Agent runtime to start in Herdr (`auto`, `claude`, `agy`, `codex`, `gemini`). Default: `auto` (Smart Router). |
+| `--model <MODEL>`| — | Explicit model override (e.g. `opus`, `sonnet`, `gemini-4-argon`, `gemini-3.8-flash`, `gpt-6-luna`). Defaults to task-type tiering. |
+| `--effort <LEVEL>`| — | Explicit reasoning effort override (`high`, `medium`, `low`). |
 | `--method <NAME>`| `-m` | Initial methodology prompt template (`bmad`, `scpe`, `none`). |
-| `--feature <NAME>`| — | Directory name for the worktree (defaults to issue key; lowercased with hyphens converted to underscores). |
-| `--slug <SLUG>` | — | Branch name slug (defaults to the issue key when `--issue` is used, otherwise `--feature`; lowercased with hyphens converted to underscores). |
+| `--feature <NAME>`| — | Directory name for the worktree (defaults to issue key or auto-derived slug from context). |
+| `--slug <SLUG>` | — | Branch name slug (defaults to feature name; lowercased with hyphens converted to underscores). |
 | `--base <PATH>` | — | Base repository path (defaults to current Git repo, then `BASE_REPO`). |
 | `--dest <PATH>` | — | Explicit destination path for the worktree. |
 | `--no-agent` | — | Open Herdr workspace but do not start an agent. |
