@@ -16,6 +16,7 @@ Usage:
   sprout init
   sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
+  sprout autopilot <once|run|start|status|stop> [options]
   sprout check-review [PR_NUMBER_OR_URL] [options]
   sprout prune [TARGET] [options]
   sprout <type> [TEXT | --context <TEXT>] [options]
@@ -39,6 +40,10 @@ Session Management & Autonomous Watcher:
   sprout session status                        View active agent session, pane, context metrics, and watcher state
   sprout session recycle [options]             Snapshot state to .sprout/handoff.md and restart fresh agent session
   sprout session watch [options]               Run non-LLM autonomous context watcher (--daemon, --status, --stop)
+
+Autopilot (event-driven, zero-LLM):
+  sprout autopilot once [--dry-run]            React once to PR events (changes requested, CI failed, approved, merged)
+  sprout autopilot start|stop|status           Run the reactions as a background daemon (docs/autopilot.md)
 
 Agent Management:
   sprout agent status                          View agent telemetry, cooldowns, 5h-window headroom, and live sessions
@@ -1111,6 +1116,19 @@ elif subcmd == "recycle":
             if target_model:
                 cmd_args += ["-m", target_model]
             cmd_args += [handoff_prompt]
+        # This script runs as `python3 - <<heredoc`, so fd 0 is the script pipe,
+        # not the terminal. Agent CLIs refuse to start without a TTY on stdin.
+        for std_fd, std_mode in ((0, os.O_RDWR), (1, os.O_RDWR), (2, os.O_RDWR)):
+            if os.isatty(std_fd):
+                continue
+            try:
+                tty_fd = os.open("/dev/tty", std_mode)
+                os.dup2(tty_fd, std_fd)
+                if tty_fd > 2:
+                    os.close(tty_fd)
+            except OSError:
+                print("Error: no controlling terminal available to launch the agent. Run 'sprout session recycle' from an interactive shell.", file=sys.stderr)
+                sys.exit(1)
         os.execvp(agent_kind, cmd_args)
 
     launch_cmd = ["herdr", "agent", "start", agent_name, "--kind", agent_kind, "--pane", pane_id] + extra_args
@@ -1382,6 +1400,329 @@ else:
     print(f"Unknown session subcommand: {subcmd}. Available: status, recycle, watch", file=sys.stderr)
     sys.exit(1)
 PYSESSION
+}
+
+autopilot_subcommand() {
+  local sub=${1:-status}
+  (($# == 0)) || shift
+  local interval_sec="" dry_run=false
+
+  while (($#)); do
+    case "$1" in
+      --interval)
+        (($# >= 2)) || { printf 'Missing value for --interval\n' >&2; exit 2; }
+        [[ "$2" =~ ^[0-9]+$ && "$2" -ge 5 ]] || { printf 'Error: --interval must be an integer >= 5 (seconds)\n' >&2; exit 2; }
+        interval_sec=$2
+        shift 2
+        ;;
+      --dry-run)
+        dry_run=true
+        shift
+        ;;
+      -h|--help)
+        cat >&2 <<'HELPAUTO'
+Usage:
+  sprout autopilot once [--dry-run]    Evaluate every worktree once, then exit
+  sprout autopilot run                 Foreground loop
+  sprout autopilot start               Detached background daemon
+  sprout autopilot status              Show daemon status
+  sprout autopilot stop                Stop the daemon
+
+Options:
+  --interval SECONDS   Seconds between ticks (default: 120, or [autopilot] interval)
+  --dry-run            Log what would happen without acting
+  -h, --help           Show this help
+
+Reacts to PR events (changes requested, CI failed, approved, merged) with
+deterministic actions and zero LLM tokens. See docs/autopilot.md.
+HELPAUTO
+        exit 0
+        ;;
+      *)
+        printf 'Unknown argument: %s\n' "$1" >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  case "$sub" in
+    once|run|start|status|stop) ;;
+    *) printf 'Unknown autopilot subcommand: %s. Available: once, run, start, status, stop\n' "$sub" >&2; exit 2 ;;
+  esac
+
+  local repo_root common_dir self_path
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  [[ -n "$repo_root" ]] || { printf 'Error: sprout autopilot must be run inside a Git repository or worktree.\n' >&2; exit 1; }
+  common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+  [[ -n "$common_dir" ]] || { printf 'Error: could not resolve the git common directory.\n' >&2; exit 1; }
+  self_path=$(readlink -f "${BASH_SOURCE[0]}")
+
+  if [[ "$sub" != "status" && "$sub" != "stop" ]]; then
+    command -v gh >/dev/null 2>&1 || { printf 'Error: GitHub CLI (gh) is required for sprout autopilot.\n' >&2; exit 1; }
+  fi
+
+  python3 - "$sub" "$repo_root" "$common_dir" "$self_path" "$interval_sec" "$dry_run" <<'PYAUTO'
+import json, os, shutil, signal, subprocess, sys, time
+from datetime import datetime
+from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    tomllib = None
+
+sub, repo_root, common_dir, self_path, interval_arg, dry_run = sys.argv[1:7]
+dry_run = dry_run == "true"
+sprout_dir = Path(common_dir) / "sprout"
+pid_file = sprout_dir / "autopilot.pid"
+log_file = sprout_dir / "autopilot.log"
+state_file = sprout_dir / "autopilot_state.json"
+
+DEFAULT_RULES = {
+    "pr_changes_requested": "check-review",
+    "ci_failed": "notify",
+    "pr_approved": "notify",
+    "pr_merged": "notify",
+}
+ACTIONS = {"check-review", "notify", "prune", "none"}
+NO_AGENT_INTERRUPT = {"check-review", "prune"}
+
+
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+
+
+def load_config():
+    interval, rules = 120, dict(DEFAULT_RULES)
+    cfg_path = sprout_dir / "config.toml"
+    if tomllib and cfg_path.exists():
+        try:
+            ap = tomllib.loads(cfg_path.read_text(encoding="utf-8")).get("autopilot") or {}
+        except Exception as e:
+            log(f"config.toml ignored (parse error: {e})")
+            ap = {}
+        if isinstance(ap.get("interval"), int) and ap["interval"] >= 5:
+            interval = ap["interval"]
+        for ev, action in (ap.get("rules") or {}).items():
+            if ev not in DEFAULT_RULES:
+                log(f"config: unknown event '{ev}' ignored")
+            elif action not in ACTIONS:
+                log(f"config: unknown action '{action}' for '{ev}' ignored")
+            else:
+                rules[ev] = action
+    if interval_arg:
+        interval = int(interval_arg)
+    return interval, rules
+
+
+def get_pid():
+    try:
+        pid = int(pid_file.read_text().strip())
+        os.kill(pid, 0)
+        return pid
+    except Exception:
+        return None
+
+
+def run(cmd, cwd=None, timeout=60):
+    return subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+
+
+def list_worktrees():
+    out = run(["git", "-C", repo_root, "worktree", "list", "--porcelain"]).stdout
+    entries, cur = [], {}
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            if cur:
+                entries.append(cur)
+            cur = {"path": line.split(" ", 1)[1]}
+        elif line.startswith("branch "):
+            cur["branch"] = line.split(" ", 1)[1].replace("refs/heads/", "")
+    if cur:
+        entries.append(cur)
+    return [e for e in entries if e.get("branch")]
+
+
+def default_branch():
+    r = run(["git", "-C", repo_root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip().split("/", 1)[-1]
+    return "main"
+
+
+def fetch_pr(branch):
+    r = run(["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json",
+             "number,state,reviewDecision,statusCheckRollup,latestReviews"], cwd=repo_root, timeout=45)
+    if r.returncode != 0:
+        log(f"gh failed for branch {branch}: {r.stderr.strip()[:200]}")
+        return None
+    prs = json.loads(r.stdout or "[]")
+    return prs[0] if prs else None
+
+
+def events_for(pr):
+    n, state = pr["number"], pr.get("state")
+    found = []
+    if state == "MERGED":
+        found.append(("pr_merged", f"{n}:pr_merged"))
+    if state != "OPEN":
+        return found
+    decision = pr.get("reviewDecision")
+    if decision == "CHANGES_REQUESTED":
+        stamps = [r.get("submittedAt") or "" for r in (pr.get("latestReviews") or []) if r.get("state") == "CHANGES_REQUESTED"]
+        found.append(("pr_changes_requested", f"{n}:pr_changes_requested:{max(stamps, default='')}"))
+    if decision == "APPROVED":
+        found.append(("pr_approved", f"{n}:pr_approved"))
+    failing = [c for c in (pr.get("statusCheckRollup") or [])
+               if (c.get("conclusion") or c.get("state") or "").upper() in ("FAILURE", "TIMED_OUT", "ERROR")]
+    if failing:
+        names = ",".join(sorted(c.get("name") or c.get("context") or "?" for c in failing))
+        stamp = max((c.get("completedAt") or "" for c in failing), default="")
+        found.append(("ci_failed", f"{n}:ci_failed:{names}:{stamp}"))
+    return found
+
+
+def working_paths():
+    if not shutil.which("herdr"):
+        return set()
+    try:
+        out = run(["herdr", "agent", "list"], timeout=15).stdout
+        agents = (json.loads(out).get("result") or {}).get("agents") or []
+    except Exception:
+        return set()
+    paths = set()
+    for ag in agents:
+        cwd = ag.get("cwd") or ag.get("foreground_cwd")
+        if cwd and (ag.get("agent_status") or "").lower() == "working":
+            paths.add(os.path.realpath(cwd))
+    return paths
+
+
+def load_state():
+    try:
+        return json.loads(state_file.read_text(encoding="utf-8"))
+    except Exception:
+        return {"handled": {}}
+
+
+def save_state(state):
+    handled = state.get("handled", {})
+    if len(handled) > 500:
+        state["handled"] = dict(sorted(handled.items(), key=lambda kv: kv[1])[-500:])
+    sprout_dir.mkdir(parents=True, exist_ok=True)
+    tmp = state_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    tmp.replace(state_file)
+
+
+def act(action, event, pr, wt):
+    label = f"{event} PR #{pr['number']} ({wt['branch']})"
+    if action == "notify":
+        log(f"{'DRY-RUN ' if dry_run else ''}NOTIFY {label}")
+        if not dry_run and shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", "Sprout autopilot", label], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    if action == "check-review":
+        cmd, cwd = [self_path, "check-review", str(pr["number"])], wt["path"]
+    elif action == "prune":
+        cmd, cwd = [self_path, "prune", "--yes", wt["path"]], repo_root
+    else:
+        return True
+    log(f"{'DRY-RUN would run' if dry_run else 'RUN'} {action} for {label}")
+    if dry_run:
+        return False
+    try:
+        r = run(cmd, cwd=cwd, timeout=600)
+    except subprocess.TimeoutExpired:
+        log(f"{action} timed out for {label}; will retry")
+        return False
+    if r.returncode != 0:
+        log(f"{action} failed (rc={r.returncode}) for {label}: {(r.stderr or r.stdout).strip()[-300:]}")
+        return False
+    return True
+
+
+def tick(rules):
+    state = load_state()
+    handled = state.setdefault("handled", {})
+    base = default_branch()
+    busy = None
+    changed = 0
+    for wt in list_worktrees():
+        if wt["branch"] == base:
+            continue
+        pr = fetch_pr(wt["branch"])
+        if not pr:
+            continue
+        for event, eid in events_for(pr):
+            if eid in handled:
+                continue
+            action = rules.get(event, "none")
+            if action in NO_AGENT_INTERRUPT:
+                if busy is None:
+                    busy = working_paths()
+                if os.path.realpath(wt["path"]) in busy:
+                    log(f"DEFER {event} PR #{pr['number']}: agent in {wt['path']} is working")
+                    continue
+            if act(action, event, pr, wt):
+                handled[eid] = datetime.now().isoformat(timespec="seconds")
+                changed += 1
+    if not dry_run:
+        save_state(state)
+    return changed
+
+
+if sub == "status":
+    pid = get_pid()
+    if pid:
+        print(f"🌱 Sprout Autopilot is ACTIVE (PID: {pid})\nLog: {log_file}")
+    else:
+        print("🌱 Sprout Autopilot is INACTIVE")
+elif sub == "stop":
+    pid = get_pid()
+    if pid:
+        os.kill(pid, signal.SIGTERM)
+        print(f"✓ Stopped Sprout Autopilot (PID: {pid}).")
+    else:
+        print("No active Sprout Autopilot daemon detected.")
+    pid_file.unlink(missing_ok=True)
+elif sub == "start":
+    if get_pid():
+        print(f"Sprout Autopilot is already running (PID: {get_pid()}).")
+        sys.exit(0)
+    sprout_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [self_path, "autopilot", "run"] + (["--interval", interval_arg] if interval_arg else [])
+    with open(log_file, "a", encoding="utf-8") as stream:
+        p = subprocess.Popen(cmd, cwd=repo_root, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream, start_new_session=True)
+    print(f"✓ Started Sprout Autopilot daemon (PID: {p.pid}). Log: {log_file}")
+elif sub == "once":
+    _, rules = load_config()
+    n = tick(rules)
+    log(f"Autopilot tick done: {n} event(s) handled{' (dry-run)' if dry_run else ''}.")
+elif sub == "run":
+    if get_pid() and get_pid() != os.getpid():
+        print(f"Sprout Autopilot is already running (PID: {get_pid()}).", file=sys.stderr)
+        sys.exit(1)
+    sprout_dir.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
+    def _bye(*_):
+        pid_file.unlink(missing_ok=True)
+        log("Sprout Autopilot stopped.")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _bye)
+    signal.signal(signal.SIGINT, _bye)
+    interval, rules = load_config()
+    log(f"Sprout Autopilot started for {repo_root}. Interval: {interval}s")
+    while True:
+        try:
+            tick(rules)
+        except Exception as e:
+            log(f"tick error: {e}")
+        time.sleep(interval)
+PYAUTO
 }
 
 manage_agent_subcommand() {
@@ -2274,6 +2615,24 @@ print(f"Base repository detected as {base_repo}; its path was not saved in eithe
 PYINIT
 }
 
+# Returns 0 when <dir> holds no project yet: missing, empty, or a repository
+# without commits that contains only Sprout/bootstrap leftovers.
+is_empty_project() {
+  local dir=$1 entry
+  [[ -e "$dir" ]] || return 0
+  [[ -d "$dir" ]] || return 1
+  if [[ -d "$dir/.git" ]] && git -C "$dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+    return 1
+  fi
+  while IFS= read -r entry; do
+    case "$entry" in
+      .git|.sprout|.jdw|.gitignore|README|README.*) ;;
+      *) return 1 ;;
+    esac
+  done < <(ls -A "$dir" 2>/dev/null)
+  return 0
+}
+
 plant_repository() {
   local source_input=""
   local dest_input=""
@@ -2315,9 +2674,13 @@ Usage:
   sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
   sprout plant [SPEC_DOC] [DEST_DIR] [options]
   sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
+  sprout plant [DEST_DIR] [options]            (empty/new directory: greenfield)
 
 Plant a base repository tree from a Git URL, local path, or a product specification
 document (.md, .markdown, .html) deterministically with zero LLMs.
+In an empty or new directory (or a repo without commits), plant runs in greenfield
+mode automatically; without a spec the agent starts product discovery
+(bmad-brainstorming / bmad-product-brief). Use --no-agent to only initialize the repo.
 
 Options:
   -s, --spec PATH       Path to a product vision, PRD, or spec document (.md, .html)
@@ -2334,6 +2697,10 @@ Examples:
   # Plant a brand new project from a Markdown specification:
   sprout plant vision.md
   sprout plant specs/prd.html ~/workspace/meu_app
+
+  # Plant an empty project (no spec):
+  sprout plant meu_app
+  sprout plant meu_app --no-agent
 
   # Plant from a remote repository:
   sprout plant git@github.com:m4rc0s/sprout.git
@@ -2454,6 +2821,17 @@ PYSPEC
     spec_ext=$(awk -F'\t' '{print $3}' <<< "$spec_info")
   fi
 
+  # Without a spec, a lone positional that is not a remote URL nor an existing
+  # project is the destination of a brand new (greenfield) project.
+  if [[ -n "$source_input" && -z "$spec_file" && -z "$dest_input" ]]; then
+    local src_path=${source_input%%#*}
+    local url_re='://|^[^/@]+@[^/:]+:|\.git/?$'
+    if [[ ! "$src_path" =~ $url_re ]] && is_empty_project "$src_path"; then
+      dest_input=$src_path
+      source_input=""
+    fi
+  fi
+
   # Check if we are inside an existing Git repo or need a Greenfield project
   local current_repo
   current_repo=$(git rev-parse --show-toplevel 2>/dev/null || true)
@@ -2491,16 +2869,31 @@ PYPARSE
     branch_from_url=$(awk -F'\t' '{print $3}' <<< "$parsed_info")
     gh_repo=$(awk -F'\t' '{print $4}' <<< "$parsed_info")
   elif [[ -n "$spec_file" ]]; then
-    if [[ -n "$current_repo" && -z "$dest_input" ]]; then
+    if [[ -n "$current_repo" && -z "$dest_input" ]] && ! is_empty_project "$current_repo"; then
       repo_url="$current_repo"
+      repo_name="$(basename "$current_repo")"
+    elif [[ -n "$current_repo" && -z "$dest_input" ]]; then
+      is_greenfield=true
+      dest_input="$current_repo"
       repo_name="$(basename "$current_repo")"
     else
       is_greenfield=true
       repo_name="$spec_slug"
     fi
-  elif [[ -n "$current_repo" ]]; then
+  elif [[ -n "$current_repo" ]] && ! is_empty_project "$current_repo"; then
     repo_url="$current_repo"
     repo_name="$(basename "$current_repo")"
+  elif [[ -n "$dest_input" || -n "$current_repo" ]] || is_empty_project "$(pwd -P)"; then
+    is_greenfield=true
+    if [[ -z "$dest_input" ]]; then
+      dest_input="${current_repo:-$(pwd -P)}"
+    fi
+    if [[ "$dest_input" == "." ]]; then
+      repo_name="$(basename "$(pwd -P)")"
+    else
+      repo_name="$(basename "$dest_input")"
+    fi
+    printf 'Note: empty project detected - planting as greenfield.\n'
   else
     printf 'Error: Provide a repository URL, Git path, or specification document (.md, .html).\nRun sprout plant --help for usage.\n' >&2
     exit 1
@@ -2536,7 +2929,7 @@ PYPARSE
   if [[ "$is_greenfield" == "true" ]]; then
     if [[ -d "$target_dir/.git" ]]; then
       printf '   Note: Directory %s is already a Git repository.\n' "$target_dir"
-    elif [[ -d "$target_dir" && $(ls -A "$target_dir" 2>/dev/null) ]]; then
+    elif [[ -d "$target_dir" ]] && ! is_empty_project "$target_dir"; then
       printf 'Error: Destination directory %s exists and is not empty.\n' "$target_dir" >&2
       exit 1
     else
@@ -2649,6 +3042,15 @@ with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
     f.write("\n")
 PYNORM_SPEC
     printf '   Context:       Saved to .sprout/issue.json and .sprout/issue.md\n'
+  elif [[ "$is_greenfield" == "true" ]]; then
+    if [[ ! -f "$target_dir/README.md" ]]; then
+      printf '# %s\n' "$project_name" > "$target_dir/README.md"
+      printf '   Created:       README.md\n'
+    fi
+    if [[ ! -f "$target_dir/.gitignore" ]]; then
+      printf '.sprout/\n.jdw\n' > "$target_dir/.gitignore"
+      printf '   Created:       .gitignore\n'
+    fi
   fi
 
   # 5. Initialize Sprout configuration (100% deterministic, zero LLMs)
@@ -2705,7 +3107,9 @@ EOF
   # 7. Initial commit if brand new repo
   if [[ "$is_greenfield" == "true" ]]; then
     git -C "$target_dir" add . >/dev/null 2>&1
-    git -C "$target_dir" commit -m "chore: plant initial project structure from spec" >/dev/null 2>&1 || true
+    local init_msg="chore: plant initial project structure"
+    [[ -z "$spec_file" ]] || init_msg="$init_msg from spec"
+    git -C "$target_dir" commit --allow-empty -m "$init_msg" >/dev/null 2>&1 || true
     printf '   Initial Commit:Created initial commit on %s\n' "$active_branch"
   fi
 
@@ -2753,6 +3157,8 @@ EOF
           local initial_prompt=""
           if [[ -n "$spec_file" ]]; then
             initial_prompt="BMad, inicie no modo plan. O projeto $project_name foi plantado a partir do documento de especificação salvo em .sprout/spec$spec_ext. A visão geral está em .sprout/issue.md. Elabore o plano de arquitetura e primeira iniciativa antes de codificar."
+          elif [[ "$is_greenfield" == "true" ]]; then
+            initial_prompt="BMad, inicie no modo plan. O projeto $project_name é um repositório vazio recém-plantado, sem especificação. Use bmad-brainstorming ou bmad-product-brief para conduzir a descoberta e comece pedindo que eu descreva o produto (problema, público e objetivo). Não codifique antes de ter a visão do produto."
           else
             initial_prompt="BMad, inicie no modo plan. Repositório base $project_name plantado e pronto. Elabore o plano de arquitetura para a primeira feature/iniciativa antes de codificar."
           fi
@@ -2769,6 +3175,9 @@ EOF
   printf '   Default Method:%s\n' "$method_override"
   if [[ -n "$spec_file" ]]; then
     printf '   Spec Context:  .sprout/spec%s (and .sprout/issue.md)\n' "$spec_ext"
+  fi
+  if [[ "$is_greenfield" == "true" && -z "$spec_file" ]]; then
+    printf '   Greenfield:    Empty project initialized (use --no-agent to skip the discovery agent)\n'
   fi
   printf '\nPara começar a brotar novas tarefas (sprout worktrees):\n'
   printf '   cd %q\n' "$target_dir"
@@ -3082,6 +3491,12 @@ fi
 if [[ "${1:-}" == "session" ]]; then
   shift
   manage_session_subcommand "$@"
+  exit 0
+fi
+
+if [[ "${1:-}" == "autopilot" ]]; then
+  shift
+  autopilot_subcommand "$@"
   exit 0
 fi
 

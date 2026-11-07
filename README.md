@@ -52,6 +52,12 @@ sprout plant /path/to/existing/repo ~/workspace/finance_tool
 # 4. Seed an existing repository with a specification document:
 sprout plant git@github.com:my-org/finance_tool.git --spec specs/v2.md
 sprout plant --spec vision.md  # inside current repo
+
+# 5. Plant an empty project (no spec): greenfield is automatic for new/empty dirs.
+# The agent starts product discovery (bmad-brainstorming / bmad-product-brief);
+# add --no-agent to only initialize the repo.
+sprout plant meu_app
+sprout plant meu_app --no-agent
 ```
 
 **Option B: Initialize inside an existing local repository (`sprout init`)**
@@ -174,6 +180,17 @@ sprout check-review --recycle
    - 📋 **Resolution Plan**: Generates an ordered fix plan for developer approval before applying code changes.
 
 
+### Autopilot: workflows that start on their own (`sprout autopilot`)
+
+A zero-LLM watcher that reacts to PR events in the current repository's worktrees: changes requested, CI failed, approved, merged. By default a review with requested changes runs `sprout check-review` for you; the others notify. It never interrupts an agent that is working, and each event fires once.
+
+```bash
+sprout autopilot once --dry-run   # see what it would do
+sprout autopilot start            # background daemon (stop / status also available)
+```
+
+Rules are configurable in `<git-common-dir>/sprout/config.toml` (`[autopilot.rules]`). See [docs/autopilot.md](docs/autopilot.md).
+
 ### Teardown (`sprout prune`)
 
 Once a task is done (merged, abandoned, or just no longer needed), `sprout prune` collapses the usual manual cleanup — closing the agent, closing the Herdr workspace, removing the worktree, and deleting both branches — into one command:
@@ -290,6 +307,7 @@ Sprout is built around pluggable issue trackers (Jira today; Linear/GitHub Issue
 
 * **[Architecture Guide](docs/architecture.md)**: Deep dive into the 3-tier design, configuration/secrets model, data flows, and extensibility.
 * **[Workflows & Methodologies](docs/workflows.md)**: Details on configuring agents, prompt templates, and project defaults.
+* **[Autopilot](docs/autopilot.md)**: Event-driven, zero-LLM reactions to PR events.
 * **[Phases & Evolution](docs/phases.md)**: The engineering milestones that shaped Sprout.
 
 ---
