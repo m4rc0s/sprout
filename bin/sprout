@@ -81,7 +81,7 @@ Examples:
   sprout fix --issue FT-123
   sprout feat --issue FT-456 --agent agy --method scpe
 HELP
-  exit 2
+  exit "${1:-2}"
 }
 
 resolve_repository() {
@@ -2860,7 +2860,7 @@ if [[ "${1:-}" == "--configure-jira" ]]; then
   exit 0
 fi
 
-[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage
+[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage 0
 [[ $# -ge 1 ]] || usage
 
 type=$1
