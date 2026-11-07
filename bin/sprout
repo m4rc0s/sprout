@@ -27,6 +27,9 @@ Tree Planting & Initialization:
 Code Review Ingestion & Triage:
   sprout check-review [PR|URL]                 Ingest PR feedback & inline comments and trigger BMad Triage (alias: review)
 
+Branch Synchronization:
+  sprout sync [options]                        Fetch latest origin/main and rebase current branch onto it (alias: rebase)
+
 Session Management & Autonomous Watcher:
   sprout session status                        View active agent session, pane, context metrics, and watcher state
   sprout session recycle [options]             Snapshot state to .sprout/handoff.md and restart fresh agent session
@@ -1045,35 +1048,35 @@ elif subcmd == "recycle":
             "agent": agent_kind,
             "tier": model_tier,
             "model": target_model,
-            "effort": target_effort
+            "effort": target_effort,
+            "mode": "plan"
         }, indent=2), encoding="utf-8")
     except Exception:
         pass
 
     # 5. Spawn clean agent
-    print(f"\n✓ Starting fresh {agent_kind} session in pane {pane_id} (model: {target_model})...")
+    print(f"\n✓ Starting fresh {agent_kind} session in pane {pane_id} (model: {target_model}, mode: plan)...")
     extra_args = []
     if agent_kind == "agy":
-        extra_args = ["--", "--new-project", "--project", worktree_root.name]
+        extra_args = ["--", "--new-project", "--project", worktree_root.name, "--mode", "plan"]
         if target_model:
             extra_args += ["--model", target_model]
         if target_effort:
             extra_args += ["--effort", target_effort]
     elif agent_kind == "claude":
-        if target_model or target_effort:
-            extra_args = ["--"]
-            if target_model:
-                extra_args += ["--model", target_model]
-            if target_effort:
-                extra_args += ["--effort", target_effort]
+        extra_args = ["--", "--permission-mode", "plan"]
+        if target_model:
+            extra_args += ["--model", target_model]
+        if target_effort:
+            extra_args += ["--effort", target_effort]
     elif agent_kind == "codex":
         if target_model:
             extra_args = ["--", "-m", target_model]
 
-    handoff_prompt = "BMad/Sprout: Sessão reiniciada com contexto limpo. Leia o snapshot de handoff em .sprout/handoff.md e continue o trabalho a partir do ponto atual."
+    handoff_prompt = "BMad/Sprout: Sessão reiniciada em modo plan com contexto limpo. Leia o snapshot de handoff em .sprout/handoff.md e elabore o plano antes de aplicar alterações."
 
     if is_current_terminal:
-        print(f"\n🚀 Launching fresh {agent_kind} session in current terminal...")
+        print(f"\n🚀 Launching fresh {agent_kind} session in current terminal (mode: plan)...")
         if is_respawn:
             print(f"✨ Agent session auto-spawned successfully! Full context preserved in handoff.md.\n")
         else:
@@ -1081,9 +1084,9 @@ elif subcmd == "recycle":
         sys.stdout.flush()
         cmd_args = [agent_kind]
         if agent_kind == "agy":
-            cmd_args += ["--model", target_model, "--effort", target_effort, "--new-project", "--project", worktree_root.name, "-i", handoff_prompt]
+            cmd_args += ["--model", target_model, "--effort", target_effort, "--mode", "plan", "--new-project", "--project", worktree_root.name, "-i", handoff_prompt]
         elif agent_kind == "claude":
-            cmd_args += ["--model", target_model, "--effort", target_effort, handoff_prompt]
+            cmd_args += ["--model", target_model, "--effort", target_effort, "--permission-mode", "plan", handoff_prompt]
         elif agent_kind == "codex":
             if target_model:
                 cmd_args += ["-m", target_model]
@@ -1968,12 +1971,13 @@ PYPARSE_REV
   "agent": "$chosen_agent",
   "tier": "$model_tier",
   "model": "$agent_model",
-  "effort": "$reasoning_effort"
+  "effort": "$reasoning_effort",
+  "mode": "plan"
 }
 EOF
 
-  local bmad_prompt="BMad, analise os apontamentos de review do PR #$pr_number em .sprout/review.md.
-Apresente de forma direta e objetiva o que precisa ser corrigido no código e aguarde confirmação para aplicar."
+  local bmad_prompt="BMad, analise os apontamentos de review do PR #$pr_number em .sprout/review.md no modo plan.
+Apresente de forma direta e objetiva o plano das correções necessárias no código e aguarde confirmação para aplicar."
 
   if [[ "$no_prompt" == "true" ]]; then
     printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree"
@@ -1987,12 +1991,12 @@ Apresente de forma direta e objetiva o que precisa ser corrigido no código e ag
   fi
 
   if [[ "$is_current_terminal" == "true" ]]; then
-    printf '\n🚀 Launching interactive %s session for BMad Review Triage...\n' "$chosen_agent"
+    printf '\n🚀 Launching interactive %s session for BMad Review Triage (mode: plan)...\n' "$chosen_agent"
     cd "$target_worktree"
     if [[ "$chosen_agent" == "agy" ]]; then
-      agy --model "$agent_model" --effort "$reasoning_effort" --new-project --project "$(basename "$target_worktree")" -i "$bmad_prompt"
+      agy --model "$agent_model" --effort "$reasoning_effort" --mode plan --new-project --project "$(basename "$target_worktree")" -i "$bmad_prompt"
     elif [[ "$chosen_agent" == "claude" ]]; then
-      claude --model "$agent_model" --effort "$reasoning_effort" "$bmad_prompt"
+      claude --model "$agent_model" --effort "$reasoning_effort" --permission-mode plan "$bmad_prompt"
     elif [[ "$chosen_agent" == "codex" ]]; then
       if [[ -n "$agent_model" ]]; then
         codex -m "$agent_model" "$bmad_prompt"
@@ -2091,16 +2095,16 @@ PYAGENT_FIND
 
         local agent_extra_args=()
         if [[ "$chosen_agent" == "agy" ]]; then
-          agent_extra_args=(-- --new-project --project "$(basename "$target_worktree")" --model "$agent_model" --effort "$reasoning_effort")
+          agent_extra_args=(-- --new-project --project "$(basename "$target_worktree")" --model "$agent_model" --effort "$reasoning_effort" --mode plan)
         elif [[ "$chosen_agent" == "claude" ]]; then
-          agent_extra_args=(-- --model "$agent_model" --effort "$reasoning_effort")
+          agent_extra_args=(-- --model "$agent_model" --effort "$reasoning_effort" --permission-mode plan)
         elif [[ "$chosen_agent" == "codex" ]]; then
           if [[ -n "$agent_model" ]]; then
-            agent_extra_args=(-- --model "$agent_model")
+            agent_extra_args=(-- -m "$agent_model")
           fi
         fi
 
-        printf 'Starting %s (%s, model: %s) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$ag_pane"
+        printf 'Starting %s (%s, model: %s, mode: plan) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$ag_pane"
         if herdr agent start "$safe_agent_name" --kind "$chosen_agent" --pane "$ag_pane" "${agent_extra_args[@]}" 2>/dev/null; then
           sleep 1.0
           ag_name="$safe_agent_name"
@@ -2704,32 +2708,33 @@ EOF
         agent_model=$(awk -F'\t' '{print $3}' <<< "$routing_res")
         reasoning_effort=$(awk -F'\t' '{print $4}' <<< "$routing_res")
 
-        printf '   Herdr Agent:   Starting %s (%s, model: %s) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$pane_id"
+        printf '   Herdr Agent:   Starting %s (%s, model: %s, mode: plan) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$pane_id"
         cat > "$target_dir/.sprout/session.json" <<EOF
 {
   "agent": "$chosen_agent",
   "tier": "$model_tier",
   "model": "$agent_model",
-  "effort": "$reasoning_effort"
+  "effort": "$reasoning_effort",
+  "mode": "plan"
 }
 EOF
         local agent_extra_args=()
         if [[ "$chosen_agent" == "agy" ]]; then
-          agent_extra_args=(-- --new-project --project "$project_name" --model "$agent_model" --effort high)
+          agent_extra_args=(-- --new-project --project "$project_name" --model "$agent_model" --effort high --mode plan)
         elif [[ "$chosen_agent" == "claude" ]]; then
-          agent_extra_args=(-- --model "$agent_model" --effort high)
+          agent_extra_args=(-- --model "$agent_model" --effort high --permission-mode plan)
         elif [[ "$chosen_agent" == "codex" ]]; then
           if [[ -n "$agent_model" ]]; then
-            agent_extra_args=(-- --model "$agent_model")
+            agent_extra_args=(-- -m "$agent_model")
           fi
         fi
 
         if herdr agent start "$safe_agent_name" --kind "$chosen_agent" --pane "$pane_id" "${agent_extra_args[@]}" 2>/dev/null; then
           local initial_prompt=""
           if [[ -n "$spec_file" ]]; then
-            initial_prompt="BMad, o projeto $project_name foi plantado a partir do documento de especificação salvo em .sprout/spec$spec_ext. A visão geral está em .sprout/issue.md. Analise as definições do produto e inicie o planejamento de arquitetura e primeira iniciativa."
+            initial_prompt="BMad, inicie no modo plan. O projeto $project_name foi plantado a partir do documento de especificação salvo em .sprout/spec$spec_ext. A visão geral está em .sprout/issue.md. Elabore o plano de arquitetura e primeira iniciativa antes de codificar."
           else
-            initial_prompt="BMad, repositório base $project_name plantado e pronto. Inicie a análise para a primeira feature/iniciativa."
+            initial_prompt="BMad, inicie no modo plan. Repositório base $project_name plantado e pronto. Elabore o plano de arquitetura para a primeira feature/iniciativa antes de codificar."
           fi
           herdr agent prompt "$safe_agent_name" "$initial_prompt" >/dev/null 2>&1 || true
         fi
@@ -2752,9 +2757,76 @@ EOF
   printf '   sprout session status\n\n'
 }
 
+sync_with_main_subcommand() {
+  local target_root=""
+  target_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ -z "$target_root" ]]; then
+    printf 'Error: sprout sync must be run inside a Git repository or worktree.\n' >&2
+    exit 1
+  fi
+
+  local cur_branch
+  cur_branch=$(git -C "$target_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if [[ -z "$cur_branch" || "$cur_branch" == "HEAD" ]]; then
+    printf 'Error: Unable to determine active branch.\n' >&2
+    exit 1
+  fi
+
+  local base_branch="main"
+  if git -C "$target_root" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$target_root" show-ref --verify --quiet refs/remotes/origin/main; then
+    base_branch="master"
+  fi
+
+  printf '\n🔄 [Sprout Sync] Synchronizing %s with origin/%s...\n' "$cur_branch" "$base_branch"
+  printf 'Fetching latest %s from origin...\n' "$base_branch"
+  if ! git -C "$target_root" fetch origin "$base_branch"; then
+    printf 'Warning: Could not fetch from origin. Checking local origin/%s reference...\n' "$base_branch" >&2
+  fi
+
+  if [[ "$cur_branch" == "$base_branch" ]]; then
+    printf 'Current branch is %s. Fast-forwarding...\n' "$base_branch"
+    git -C "$target_root" merge --ff-only "origin/$base_branch"
+    printf '✓ Branch %s is up-to-date with origin/%s.\n' "$base_branch" "$base_branch"
+    return 0
+  fi
+
+  local did_stash=false
+  if ! git -C "$target_root" diff --quiet || ! git -C "$target_root" diff --cached --quiet; then
+    printf '⚠️  Working tree has uncommitted changes. Stashing before rebase...\n'
+    git -C "$target_root" stash push -m "sprout-sync-autostash" >/dev/null 2>&1
+    did_stash=true
+  fi
+
+  printf 'Rebasing %s on top of origin/%s...\n' "$cur_branch" "$base_branch"
+  if git -C "$target_root" rebase "origin/$base_branch"; then
+    printf '✓ Successfully rebased %s onto origin/%s.\n' "$cur_branch" "$base_branch"
+    git -C "$target_root" config branch."$cur_branch".remote origin
+    git -C "$target_root" config branch."$cur_branch".merge "refs/heads/$base_branch"
+    git -C "$target_root" config branch."$cur_branch".rebase true
+  else
+    printf '⚠️  Rebase encountered conflicts. Please resolve conflicts or run: git rebase --abort\n' >&2
+    if [[ "$did_stash" == "true" ]]; then
+      printf 'Note: uncommitted changes were stashed (git stash pop).\n' >&2
+    fi
+    return 1
+  fi
+
+  if [[ "$did_stash" == "true" ]]; then
+    printf 'Restoring stashed changes...\n'
+    git -C "$target_root" stash pop >/dev/null 2>&1 || true
+  fi
+  printf '✨ Branch %s is now current with origin/%s.\n\n' "$cur_branch" "$base_branch"
+}
+
 if [[ "${1:-}" == "plant" ]]; then
   shift
   plant_repository "$@"
+  exit 0
+fi
+
+if [[ "${1:-}" == "sync" || "${1:-}" == "rebase" ]]; then
+  shift
+  sync_with_main_subcommand "$@"
   exit 0
 fi
 
@@ -3142,13 +3214,27 @@ if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
   printf 'Branch already exists: %s\n' "$branch" >&2
   exit 1
 fi
-if ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main; then
-  printf 'Missing origin/main in base repository. Fetch it before creating a worktree.\n' >&2
-  exit 1
-fi
+  local base_branch="main"
+  if git -C "$repo" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main; then
+    base_branch="master"
+  fi
 
-git -C "$repo" worktree add --track -b "$branch" "$target" origin/main
-printf '\nCreated worktree: %s\nBranch: %s (tracking origin/main)\nBase: %s\n' "$target" "$branch" "$repo"
+  printf '\nFetching latest %s from origin to ensure branch reference is up-to-date...\n' "$base_branch"
+  git -C "$repo" fetch origin "$base_branch" >/dev/null 2>&1 || true
+
+  if ! git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+    printf 'Missing origin/%s in base repository. Fetch it before creating a worktree.\n' "$base_branch" >&2
+    exit 1
+  fi
+
+  git -C "$repo" worktree add --track -b "$branch" "$target" "origin/$base_branch"
+  printf '\nCreated worktree: %s\nBranch: %s (tracking origin/%s)\nBase: %s\n' "$target" "$branch" "$base_branch" "$repo"
+
+  # Configure branch to track origin/main with automatic rebase on pull
+  git -C "$target" config branch."$branch".remote origin
+  git -C "$target" config branch."$branch".merge "refs/heads/$base_branch"
+  git -C "$target" config branch."$branch".rebase true
+  git -C "$target" config pull.rebase true
 [[ -z "$project_name" ]] || printf 'Project: %s\n' "$project_name"
 [[ -z "$github_repo" ]] || printf 'GitHub: %s\n' "$github_repo"
 if [[ -n "$issue" ]]; then
@@ -3283,18 +3369,19 @@ if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1; then
     
     if [[ "$no_agent" != "true" && -n "$pane_id" ]]; then
       safe_agent_name=$(printf 'agent-%s' "$workspace_label" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
-      printf 'Starting agent %s (kind: %s, model: %s, effort: %s) in Herdr pane %s...\n' "$safe_agent_name" "$agent" "$model_name" "$reasoning_effort" "$pane_id"
+      printf 'Starting agent %s (kind: %s, model: %s, effort: %s, mode: plan) in Herdr pane %s...\n' "$safe_agent_name" "$agent" "$model_name" "$reasoning_effort" "$pane_id"
       cat > "$target/.sprout/session.json" <<EOF
 {
   "agent": "$agent",
   "tier": "$model_tier",
   "model": "$model_name",
-  "effort": "$reasoning_effort"
+  "effort": "$reasoning_effort",
+  "mode": "plan"
 }
 EOF
       agent_extra_args=()
       if [[ "$agent" == "agy" ]]; then
-        agent_extra_args=(-- --new-project --project "$workspace_label")
+        agent_extra_args=(-- --new-project --project "$workspace_label" --mode plan)
         if [[ -n "$model_name" ]]; then
           agent_extra_args+=(--model "$model_name")
         fi
@@ -3302,18 +3389,16 @@ EOF
           agent_extra_args+=(--effort "$reasoning_effort")
         fi
       elif [[ "$agent" == "claude" ]]; then
-        if [[ -n "$model_name" || -n "$reasoning_effort" ]]; then
-          agent_extra_args=(--)
-          if [[ -n "$model_name" ]]; then
-            agent_extra_args+=(--model "$model_name")
-          fi
-          if [[ -n "$reasoning_effort" ]]; then
-            agent_extra_args+=(--effort "$reasoning_effort")
-          fi
+        agent_extra_args=(-- --permission-mode plan)
+        if [[ -n "$model_name" ]]; then
+          agent_extra_args+=(--model "$model_name")
+        fi
+        if [[ -n "$reasoning_effort" ]]; then
+          agent_extra_args+=(--effort "$reasoning_effort")
         fi
       elif [[ "$agent" == "codex" ]]; then
         if [[ -n "$model_name" ]]; then
-          agent_extra_args=(-- --model "$model_name")
+          agent_extra_args=(-- -m "$model_name")
         fi
       fi
       if herdr agent start "$safe_agent_name" --kind "$agent" --pane "$pane_id" "${agent_extra_args[@]}" 2>/dev/null; then
@@ -3321,19 +3406,19 @@ EOF
         case "$method" in
           bmad)
             if [[ -n "$issue" ]]; then
-              method_prompt="BMad, analise a feature/issue $workspace_label (${summary:-$feature}). A descrição e os detalhes do Jira estão salvos em .sprout/issue.json e .sprout/issue.md. Inicie a análise inicial para elaborarmos o briefing da implementação."
+              method_prompt="BMad, inicie no modo plan para planejar a tarefa/feature $workspace_label (${summary:-$feature}). A descrição e os detalhes do Jira estão salvos em .sprout/issue.json e .sprout/issue.md. Elabore o plano de implementação antes de realizar alterações no código e aguarde confirmação."
             else
-              method_prompt="BMad, analise a tarefa $workspace_label (${summary:-$feature}). O briefing e contexto inicial estão salvos em .sprout/issue.json e .sprout/issue.md. Inicie a análise inicial para elaborarmos o plano de implementação."
+              method_prompt="BMad, inicie no modo plan para planejar a tarefa $workspace_label (${summary:-$feature}). O briefing e contexto inicial estão salvos em .sprout/issue.json e .sprout/issue.md. Elabore o plano de implementação antes de realizar alterações no código e aguarde confirmação."
             fi
             ;;
           scpe)
-            method_prompt="SCPE: analise a tarefa $workspace_label (${summary:-$feature}) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."
+            method_prompt="SCPE: inicie no modo plan para especificar a tarefa $workspace_label (${summary:-$feature}) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."
             ;;
           none|"")
             method_prompt=""
             ;;
           *)
-            method_prompt="Analise a tarefa $workspace_label (${summary:-$feature}). Detalhes disponíveis em .sprout/issue.json."
+            method_prompt="Inicie no modo plan para analisar a tarefa $workspace_label (${summary:-$feature}). Detalhes disponíveis em .sprout/issue.json. Elabore o plano antes de modificar arquivos."
             ;;
         esac
 
