@@ -52,6 +52,12 @@ sprout plant /path/to/existing/repo ~/workspace/finance_tool
 # 4. Seed an existing repository with a specification document:
 sprout plant git@github.com:my-org/finance_tool.git --spec specs/v2.md
 sprout plant --spec vision.md  # inside current repo
+
+# 5. Plant an empty project (no spec): greenfield is automatic for new/empty dirs.
+# The agent starts product discovery (bmad-brainstorming / bmad-product-brief);
+# add --no-agent to only initialize the repo.
+sprout plant meu_app
+sprout plant meu_app --no-agent
 ```
 
 **Option B: Initialize inside an existing local repository (`sprout init`)**

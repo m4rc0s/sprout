@@ -2287,6 +2287,24 @@ print(f"Base repository detected as {base_repo}; its path was not saved in eithe
 PYINIT
 }
 
+# Returns 0 when <dir> holds no project yet: missing, empty, or a repository
+# without commits that contains only Sprout/bootstrap leftovers.
+is_empty_project() {
+  local dir=$1 entry
+  [[ -e "$dir" ]] || return 0
+  [[ -d "$dir" ]] || return 1
+  if [[ -d "$dir/.git" ]] && git -C "$dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+    return 1
+  fi
+  while IFS= read -r entry; do
+    case "$entry" in
+      .git|.sprout|.jdw|.gitignore|README|README.*) ;;
+      *) return 1 ;;
+    esac
+  done < <(ls -A "$dir" 2>/dev/null)
+  return 0
+}
+
 plant_repository() {
   local source_input=""
   local dest_input=""
@@ -2328,9 +2346,13 @@ Usage:
   sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
   sprout plant [SPEC_DOC] [DEST_DIR] [options]
   sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
+  sprout plant [DEST_DIR] [options]            (empty/new directory: greenfield)
 
 Plant a base repository tree from a Git URL, local path, or a product specification
 document (.md, .markdown, .html) deterministically with zero LLMs.
+In an empty or new directory (or a repo without commits), plant runs in greenfield
+mode automatically; without a spec the agent starts product discovery
+(bmad-brainstorming / bmad-product-brief). Use --no-agent to only initialize the repo.
 
 Options:
   -s, --spec PATH       Path to a product vision, PRD, or spec document (.md, .html)
@@ -2347,6 +2369,10 @@ Examples:
   # Plant a brand new project from a Markdown specification:
   sprout plant vision.md
   sprout plant specs/prd.html ~/workspace/meu_app
+
+  # Plant an empty project (no spec):
+  sprout plant meu_app
+  sprout plant meu_app --no-agent
 
   # Plant from a remote repository:
   sprout plant git@github.com:m4rc0s/sprout.git
@@ -2467,6 +2493,17 @@ PYSPEC
     spec_ext=$(awk -F'\t' '{print $3}' <<< "$spec_info")
   fi
 
+  # Without a spec, a lone positional that is not a remote URL nor an existing
+  # project is the destination of a brand new (greenfield) project.
+  if [[ -n "$source_input" && -z "$spec_file" && -z "$dest_input" ]]; then
+    local src_path=${source_input%%#*}
+    local url_re='://|^[^/@]+@[^/:]+:|\.git/?$'
+    if [[ ! "$src_path" =~ $url_re ]] && is_empty_project "$src_path"; then
+      dest_input=$src_path
+      source_input=""
+    fi
+  fi
+
   # Check if we are inside an existing Git repo or need a Greenfield project
   local current_repo
   current_repo=$(git rev-parse --show-toplevel 2>/dev/null || true)
@@ -2504,16 +2541,31 @@ PYPARSE
     branch_from_url=$(awk -F'\t' '{print $3}' <<< "$parsed_info")
     gh_repo=$(awk -F'\t' '{print $4}' <<< "$parsed_info")
   elif [[ -n "$spec_file" ]]; then
-    if [[ -n "$current_repo" && -z "$dest_input" ]]; then
+    if [[ -n "$current_repo" && -z "$dest_input" ]] && ! is_empty_project "$current_repo"; then
       repo_url="$current_repo"
+      repo_name="$(basename "$current_repo")"
+    elif [[ -n "$current_repo" && -z "$dest_input" ]]; then
+      is_greenfield=true
+      dest_input="$current_repo"
       repo_name="$(basename "$current_repo")"
     else
       is_greenfield=true
       repo_name="$spec_slug"
     fi
-  elif [[ -n "$current_repo" ]]; then
+  elif [[ -n "$current_repo" ]] && ! is_empty_project "$current_repo"; then
     repo_url="$current_repo"
     repo_name="$(basename "$current_repo")"
+  elif [[ -n "$dest_input" || -n "$current_repo" ]] || is_empty_project "$(pwd -P)"; then
+    is_greenfield=true
+    if [[ -z "$dest_input" ]]; then
+      dest_input="${current_repo:-$(pwd -P)}"
+    fi
+    if [[ "$dest_input" == "." ]]; then
+      repo_name="$(basename "$(pwd -P)")"
+    else
+      repo_name="$(basename "$dest_input")"
+    fi
+    printf 'Note: empty project detected - planting as greenfield.\n'
   else
     printf 'Error: Provide a repository URL, Git path, or specification document (.md, .html).\nRun sprout plant --help for usage.\n' >&2
     exit 1
@@ -2549,7 +2601,7 @@ PYPARSE
   if [[ "$is_greenfield" == "true" ]]; then
     if [[ -d "$target_dir/.git" ]]; then
       printf '   Note: Directory %s is already a Git repository.\n' "$target_dir"
-    elif [[ -d "$target_dir" && $(ls -A "$target_dir" 2>/dev/null) ]]; then
+    elif [[ -d "$target_dir" ]] && ! is_empty_project "$target_dir"; then
       printf 'Error: Destination directory %s exists and is not empty.\n' "$target_dir" >&2
       exit 1
     else
@@ -2662,6 +2714,15 @@ with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
     f.write("\n")
 PYNORM_SPEC
     printf '   Context:       Saved to .sprout/issue.json and .sprout/issue.md\n'
+  elif [[ "$is_greenfield" == "true" ]]; then
+    if [[ ! -f "$target_dir/README.md" ]]; then
+      printf '# %s\n' "$project_name" > "$target_dir/README.md"
+      printf '   Created:       README.md\n'
+    fi
+    if [[ ! -f "$target_dir/.gitignore" ]]; then
+      printf '.sprout/\n.jdw\n' > "$target_dir/.gitignore"
+      printf '   Created:       .gitignore\n'
+    fi
   fi
 
   # 5. Initialize Sprout configuration (100% deterministic, zero LLMs)
@@ -2718,7 +2779,9 @@ EOF
   # 7. Initial commit if brand new repo
   if [[ "$is_greenfield" == "true" ]]; then
     git -C "$target_dir" add . >/dev/null 2>&1
-    git -C "$target_dir" commit -m "chore: plant initial project structure from spec" >/dev/null 2>&1 || true
+    local init_msg="chore: plant initial project structure"
+    [[ -z "$spec_file" ]] || init_msg="$init_msg from spec"
+    git -C "$target_dir" commit --allow-empty -m "$init_msg" >/dev/null 2>&1 || true
     printf '   Initial Commit:Created initial commit on %s\n' "$active_branch"
   fi
 
@@ -2766,6 +2829,8 @@ EOF
           local initial_prompt=""
           if [[ -n "$spec_file" ]]; then
             initial_prompt="BMad, inicie no modo plan. O projeto $project_name foi plantado a partir do documento de especificação salvo em .sprout/spec$spec_ext. A visão geral está em .sprout/issue.md. Elabore o plano de arquitetura e primeira iniciativa antes de codificar."
+          elif [[ "$is_greenfield" == "true" ]]; then
+            initial_prompt="BMad, inicie no modo plan. O projeto $project_name é um repositório vazio recém-plantado, sem especificação. Use bmad-brainstorming ou bmad-product-brief para conduzir a descoberta e comece pedindo que eu descreva o produto (problema, público e objetivo). Não codifique antes de ter a visão do produto."
           else
             initial_prompt="BMad, inicie no modo plan. Repositório base $project_name plantado e pronto. Elabore o plano de arquitetura para a primeira feature/iniciativa antes de codificar."
           fi
@@ -2782,6 +2847,9 @@ EOF
   printf '   Default Method:%s\n' "$method_override"
   if [[ -n "$spec_file" ]]; then
     printf '   Spec Context:  .sprout/spec%s (and .sprout/issue.md)\n' "$spec_ext"
+  fi
+  if [[ "$is_greenfield" == "true" && -z "$spec_file" ]]; then
+    printf '   Greenfield:    Empty project initialized (use --no-agent to skip the discovery agent)\n'
   fi
   printf '\nPara começar a brotar novas tarefas (sprout worktrees):\n'
   printf '   cd %q\n' "$target_dir"
