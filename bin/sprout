@@ -13,6 +13,7 @@ Usage:
   sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
   sprout plant [SPEC_DOC] [DEST_DIR] [options]
   sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
+  sprout plant "<PROMPT>" [DEST_DIR] [options]
   sprout init
   sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
@@ -2309,6 +2310,8 @@ plant_repository() {
   local source_input=""
   local dest_input=""
   local spec_input=""
+  local prompt_input=""
+  local prompt_mode=false
   local branch_override=""
   local name_override=""
   local agent_override="auto"
@@ -2321,6 +2324,10 @@ plant_repository() {
       -s|--spec)
         (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
         spec_input=$2; shift 2 ;;
+      -p|--prompt)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        if [[ "$2" == "-" ]]; then prompt_input=$(cat); else prompt_input=$2; fi
+        shift 2 ;;
       -b|--branch)
         (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
         branch_override=$2; shift 2 ;;
@@ -2346,6 +2353,7 @@ Usage:
   sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
   sprout plant [SPEC_DOC] [DEST_DIR] [options]
   sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
+  sprout plant "<PROMPT>" [DEST_DIR] [options]  (new project from a free-form prompt)
   sprout plant [DEST_DIR] [options]            (empty/new directory: greenfield)
 
 Plant a base repository tree from a Git URL, local path, or a product specification
@@ -2356,6 +2364,7 @@ mode automatically; without a spec the agent starts product discovery
 
 Options:
   -s, --spec PATH       Path to a product vision, PRD, or spec document (.md, .html)
+  -p, --prompt TEXT     Describe the project inline (use '-' to read from stdin); saved as the spec
   -b, --branch BRANCH   Branch to checkout after cloning (e.g. main, develop, feat/xyz)
   --dest PATH           Destination directory (defaults to repo name or derived project slug)
   --name NAME           Project display name (defaults to repository name or document title)
@@ -2369,6 +2378,10 @@ Examples:
   # Plant a brand new project from a Markdown specification:
   sprout plant vision.md
   sprout plant specs/prd.html ~/workspace/meu_app
+
+  # Plant a brand new project from a prompt (no pre-existing dir or repo):
+  sprout plant "app de tarefas em Next.js com login" ~/workspace/meu_app
+  sprout plant --prompt "API de pagamentos em Go" ~/workspace/pagamentos
 
   # Plant an empty project (no spec):
   sprout plant meu_app
@@ -2389,7 +2402,11 @@ PLANTHelp
       *)
         if [[ -z "$spec_input" && ( "$1" =~ \.(md|markdown|html|htm)$ || ( -f "$1" && ! -d "$1" ) ) ]]; then
           spec_input=$1
-        elif [[ -z "$source_input" && -z "$spec_input" ]]; then
+        elif [[ -z "$prompt_input" && -z "$source_input" && -z "$spec_input" && "$1" =~ [[:space:]] \
+                && ! -e "$1" && ! "$1" =~ ://|^[^/@\ ]+@[^/:\ ]+: ]]; then
+          # Free-form text (whitespace, not a URL, not an existing path): treat as a project prompt.
+          prompt_input=$1
+        elif [[ -z "$source_input" && -z "$spec_input" && -z "$prompt_input" ]]; then
           source_input=$1
         elif [[ -z "$dest_input" ]]; then
           dest_input=$1
@@ -2405,6 +2422,20 @@ PLANTHelp
   local spec_title=""
   local spec_slug=""
   local spec_ext=""
+
+  # A prompt is an inline spec: write it to a temporary markdown file and reuse the spec flow.
+  if [[ -n "$prompt_input" ]]; then
+    if [[ -n "$spec_input" ]]; then
+      printf 'Error: Use either a prompt or a specification document, not both.\n' >&2
+      exit 2
+    fi
+    local prompt_tmp
+    prompt_tmp=$(mktemp -d)
+    trap "rm -rf '$prompt_tmp'" EXIT
+    printf '%s\n' "$prompt_input" > "$prompt_tmp/prompt.md"
+    spec_input="$prompt_tmp/prompt.md"
+    prompt_mode=true
+  fi
 
   if [[ -n "$spec_input" ]]; then
     if [[ ! -f "$spec_input" ]]; then
@@ -2493,9 +2524,9 @@ PYSPEC
     spec_ext=$(awk -F'\t' '{print $3}' <<< "$spec_info")
   fi
 
-  # Without a spec, a lone positional that is not a remote URL nor an existing
-  # project is the destination of a brand new (greenfield) project.
-  if [[ -n "$source_input" && -z "$spec_file" && -z "$dest_input" ]]; then
+  # A lone positional that is not a remote URL nor an existing project is the
+  # destination of a brand new (greenfield) project.
+  if [[ -n "$source_input" && -z "$dest_input" ]]; then
     local src_path=${source_input%%#*}
     local url_re='://|^[^/@]+@[^/:]+:|\.git/?$'
     if [[ ! "$src_path" =~ $url_re ]] && is_empty_project "$src_path"; then
@@ -2551,6 +2582,11 @@ PYPARSE
     else
       is_greenfield=true
       repo_name="$spec_slug"
+      if [[ "$prompt_mode" == "true" && -n "$dest_input" ]]; then
+        # The project is named after the directory the user chose, not after the prompt text.
+        if [[ "$dest_input" == "." ]]; then repo_name="$(basename "$(pwd -P)")"; else repo_name="$(basename "$dest_input")"; fi
+        spec_title=""
+      fi
     fi
   elif [[ -n "$current_repo" ]] && ! is_empty_project "$current_repo"; then
     repo_url="$current_repo"
@@ -2656,11 +2692,13 @@ PYPARSE
     cp "$spec_file" "$target_dir/.sprout/spec${spec_ext}"
     printf '   Spec Ingest:   Saved to .sprout/spec%s\n' "$spec_ext"
 
+    local prompt_label=""
+    [[ "$prompt_mode" != "true" ]] || prompt_label="a prompt"
     if [[ ! -f "$target_dir/README.md" ]]; then
       cat > "$target_dir/README.md" <<EOF
 # ${project_name}
 
-Project planted by Sprout from \`${spec_file##*/}\`.
+Project planted by Sprout from ${prompt_label:-\`${spec_file##*/}\`}.
 
 ## Vision & Overview
 See \`.sprout/spec${spec_ext}\` for detailed requirements and specifications.
