@@ -78,6 +78,12 @@ export function createMockApi(options: MockOptions = {}): SproutApi {
         return;
       }
 
+      if (request.agent === "nenhum") {
+        yield { type: "log", level: "info", line: "Agente: nenhum (somente o repositório foi criado)" };
+        yield { type: "done", dest: request.dest, paneId: null };
+        return;
+      }
+
       yield { type: "log", level: "ok", line: "Herdr: workspace criado" };
       await wait(delayMs, signal);
       yield { type: "log", level: "ok", line: `Agente ${request.agent === "auto" ? "claude" : request.agent} iniciado em plan mode` };

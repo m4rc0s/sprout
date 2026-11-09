@@ -19,10 +19,11 @@ const LEVEL_LABEL: Record<LogLevel, string> = {
 /** Progresso do plantio, uma linha por passo, anunciado para leitores de tela. */
 export function PlantLog({ entries }: PlantLogProps) {
   return (
-    <ol aria-label="Progresso do plantio" aria-live="polite">
+    <ol className="log" aria-label="Progresso do plantio" aria-live="polite">
       {entries.map((entry, index) => (
         <li key={index} data-level={entry.level}>
-          [{LEVEL_LABEL[entry.level]}] {entry.line}
+          <span className="log-marker">[{LEVEL_LABEL[entry.level]}]</span>
+          {entry.line}
         </li>
       ))}
     </ol>

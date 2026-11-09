@@ -10,11 +10,15 @@ interface AppShellProps {
 export function AppShell({ notice, children }: AppShellProps) {
   return (
     <div>
-      <header>
-        <h1>Sprout</h1>
-        {notice ? <p role="status">{notice}</p> : null}
+      <header className="app-header">
+        <h1 className="readout">Sprout</h1>
+        {notice ? (
+          <p role="status" className="label">
+            {notice}
+          </p>
+        ) : null}
       </header>
-      <main>{children}</main>
+      <main className="screen">{children}</main>
     </div>
   );
 }

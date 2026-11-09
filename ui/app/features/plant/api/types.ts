@@ -1,5 +1,6 @@
 /** Agentes que o `sprout plant` aceita em `--agent`. */
-export type AgentChoice = "auto" | "claude" | "agy" | "codex";
+/** `nenhum`: cria só o repositório, sem iniciar agente. */
+export type AgentChoice = "auto" | "claude" | "agy" | "codex" | "nenhum";
 
 export interface PlantRequest {
   /** Texto markdown com a ideia do projeto (salvo como spec). */

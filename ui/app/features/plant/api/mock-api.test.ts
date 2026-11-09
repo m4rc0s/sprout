@@ -31,6 +31,12 @@ describe("createMockApi.plant", () => {
     expect(events.some((e) => e.type === "log" && e.level === "warn")).toBe(true);
   });
 
+  test("agente nenhum cria o projeto e não devolve pane", async () => {
+    const events = await collect(createMockApi({ delayMs: 0 }).plant({ ...request, agent: "nenhum" }));
+    expect(events.at(-1)).toEqual({ type: "done", dest: request.dest, paneId: null });
+    expect(events.some((e) => e.type === "log" && e.line.includes("nenhum"))).toBe(true);
+  });
+
   test("abortar interrompe a emissão de passos", async () => {
     const controller = new AbortController();
     controller.abort();

@@ -17,7 +17,7 @@ describe("PlantForm", () => {
     render(<PlantForm onSubmit={onSubmit} />);
     await user.click(screen.getByRole("button", { name: "Plantar" }));
     expect(onSubmit).not.toHaveBeenCalled();
-    expect(screen.getByText("Cole ou escreva a ideia do projeto.")).toBeInTheDocument();
+    expect(screen.getByText(/\[erro\] Cole ou escreva a ideia do projeto\./)).toBeInTheDocument();
   });
 
   test("não envia com destino relativo", async () => {
@@ -44,6 +44,20 @@ describe("PlantForm", () => {
       dest: "~/workspace/meu_app",
       agent: "codex",
     });
+  });
+
+  test("Ctrl+Enter no campo de texto envia o formulário", async () => {
+    const user = userEvent.setup();
+    const onSubmit = mock();
+    render(<PlantForm onSubmit={onSubmit} />);
+    await user.type(screen.getByLabelText(/descreva o projeto/i), "# Meu App");
+    await user.keyboard("{Control>}{Enter}{/Control}");
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  test("oferece a opção de não iniciar agente", () => {
+    render(<PlantForm onSubmit={mock()} />);
+    expect(screen.getByRole("option", { name: "nenhum" })).toBeInTheDocument();
   });
 
   test("desabilita os campos enquanto planta", () => {

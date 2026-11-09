@@ -1,7 +1,49 @@
 /**
- * Tokens de design: ponto único onde a identidade visual entrará.
- * A casca ainda não define cores, tipografia nem espaçamento; o DESIGN.md
- * (etapa de UX) preenche este arquivo. Regra: nada de cor hardcoded fora daqui.
+ * Design tokens: único lugar onde a identidade visual (HUD, ver DESIGN.md) é definida.
+ * Valores em OKLCH; componentes nunca usam cor literal, só var(--...).
  */
 :root {
+  color-scheme: dark;
+
+  /* Paleta do brief (convertida de sRGB para OKLCH) */
+  --color-bg: oklch(17.1% 0.028 267);
+  --color-cyan: oklch(90.5% 0.155 195);
+  --color-blue: oklch(61.5% 0.211 256);
+  --color-alert: oklch(62.8% 0.258 29);
+  --color-ok: oklch(86.6% 0.295 142);
+  --color-danger-text: oklch(67.3% 0.215 25);
+
+  /* Derivados (suposição de design: ver DESIGN.md) */
+  --color-surface: oklch(21.4% 0.033 241);
+  --color-text: oklch(94.6% 0.015 251);
+  --color-text-muted: oklch(90.5% 0.155 195 / 0.7);
+  --color-line: oklch(90.5% 0.155 195 / 0.5);
+  --color-line-soft: oklch(90.5% 0.155 195 / 0.3);
+  --color-grid: oklch(90.5% 0.155 195 / 0.04);
+  --color-fill-soft: oklch(90.5% 0.155 195 / 0.1);
+  --color-glow: oklch(90.5% 0.155 195 / 0.6);
+  --color-glow-text: oklch(90.5% 0.155 195 / 0.5);
+
+  /* Terminal (xterm lê estes tokens em runtime) */
+  --terminal-bg: var(--color-bg);
+  --terminal-fg: var(--color-text);
+  --terminal-ansi-black: oklch(40% 0.03 260);
+  --terminal-ansi-red: var(--color-danger-text);
+  --terminal-ansi-green: var(--color-ok);
+  --terminal-ansi-yellow: var(--color-blue);
+  --terminal-ansi-blue: var(--color-blue);
+  --terminal-ansi-magenta: var(--color-cyan);
+  --terminal-ansi-cyan: var(--color-cyan);
+  --terminal-ansi-white: var(--color-text);
+
+  /* Tipografia */
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Espaçamento (escala de 4) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
 }

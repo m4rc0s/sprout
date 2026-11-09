@@ -1,4 +1,4 @@
-import { lazy, Suspense, useMemo, useReducer, useRef } from "react";
+import { lazy, Suspense, useCallback, useMemo, useReducer, useRef } from "react";
 import { useSearchParams } from "react-router";
 import { AppShell } from "~/shared/layout/app-shell";
 import { ApiProvider, useSproutApi } from "~/features/plant/api/api-context";
@@ -6,6 +6,7 @@ import { createMockApi, parseScenario } from "~/features/plant/api/mock-api";
 import type { PlantRequest } from "~/features/plant/api/types";
 import { PlantForm } from "~/features/plant/components/plant-form";
 import { PlantLog, type LogEntry } from "~/features/plant/components/plant-log";
+import { SproutGlyph } from "~/shared/ui/sprout-glyph";
 
 // O xterm só é carregado quando existe um agente para mostrar.
 const TerminalView = lazy(() => import("~/features/terminal/terminal-view"));
@@ -89,41 +90,65 @@ function PlantScreen() {
 
   const busy = state.phase === "planting";
   const showForm = state.phase === "idle" || state.phase === "failed";
+  const agentHeadingRef = useRef<HTMLHeadingElement>(null);
+  const leaveTerminal = useCallback(() => agentHeadingRef.current?.focus(), []);
+  const noAgentByChoice = state.request?.agent === "nenhum";
 
   return (
     <>
-      <section aria-labelledby="project-heading">
+      <section className="panel" aria-labelledby="project-heading">
         <h2 id="project-heading">Projeto</h2>
         {showForm ? (
           <>
-            {state.error ? <p role="alert">{state.error}</p> : null}
+            {state.error ? (
+              <p role="alert" className="notice-error">
+                <span className="log-marker">[erro]</span>
+                {state.error}
+              </p>
+            ) : null}
             <PlantForm disabled={busy} onSubmit={plant} />
           </>
         ) : (
-          <>
+          <div className="stack">
             <p>
               Spec enviada para <code>{state.request?.dest}</code> (agente: {state.request?.agent}).
             </p>
             {!busy ? (
-              <button type="button" onClick={() => dispatch({ type: "reset" })}>
+              <button type="button" className="button" onClick={() => dispatch({ type: "reset" })}>
                 Plantar outro
               </button>
             ) : null}
-          </>
+          </div>
         )}
       </section>
 
-      <section aria-labelledby="agent-heading">
-        <h2 id="agent-heading">Agente</h2>
-        {state.phase === "idle" ? <p>O progresso e o terminal do agente aparecem aqui depois de plantar.</p> : null}
+      <section className="panel" aria-labelledby="agent-heading">
+        {busy ? <span className="scan" aria-hidden="true" /> : null}
+        <h2 id="agent-heading" ref={agentHeadingRef} tabIndex={-1}>
+          {state.phase === "running" ? <span className="status-dot" aria-hidden="true" /> : null}
+          Agente
+        </h2>
+        {busy ? <SproutGlyph /> : null}
+        {state.phase === "idle" ? (
+          <p className="hint">O progresso e o terminal do agente aparecem aqui depois de plantar.</p>
+        ) : null}
         {state.log.length > 0 ? <PlantLog entries={state.log} /> : null}
         {state.phase === "no-agent" ? (
-          <p role="status">Projeto criado, mas o Herdr não está disponível. Abra o projeto no terminal para continuar.</p>
+          <p role="status">
+            {noAgentByChoice
+              ? "Projeto criado sem agente, como você escolheu. Abra o projeto no terminal para continuar."
+              : "Projeto criado, mas o Herdr não está disponível. Abra o projeto no terminal para continuar."}
+          </p>
         ) : null}
         {transport ? (
-          <Suspense fallback={<p>Abrindo terminal…</p>}>
-            <TerminalView transport={transport} />
-          </Suspense>
+          <>
+            <div className="terminal-frame">
+              <Suspense fallback={<p>Abrindo terminal…</p>}>
+                <TerminalView transport={transport} onExit={leaveTerminal} />
+              </Suspense>
+            </div>
+            <p className="hint">Ctrl+Shift+Espaço sai do terminal.</p>
+          </>
         ) : null}
       </section>
     </>
