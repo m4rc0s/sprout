@@ -43,7 +43,7 @@ export default function TerminalView({ transport, label = "Terminal do agente", 
         theme: {
           background: color("--terminal-bg"),
           foreground: color("--terminal-fg"),
-          cursor: color("--color-cyan"),
+          cursor: color("--terminal-cursor"),
           black: color("--terminal-ansi-black"),
           red: color("--terminal-ansi-red"),
           green: color("--terminal-ansi-green"),

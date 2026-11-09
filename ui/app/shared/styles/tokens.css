@@ -1,43 +1,97 @@
 /**
- * Design tokens: único lugar onde a identidade visual (HUD, ver DESIGN.md) é definida.
+ * Design tokens: único lugar onde a identidade visual é definida (ver DESIGN.md).
+ * Dois temas sobre os mesmos componentes: HUD (padrão) e Orgânico
+ * (`data-theme="organic"` no <html>, escolhido por ?tema=organico).
  * Valores em OKLCH; componentes nunca usam cor literal, só var(--...).
  */
+
+/* ===== Tema HUD (escuro) ===== */
 :root {
   color-scheme: dark;
 
   /* Paleta do brief (convertida de sRGB para OKLCH) */
-  --color-bg: oklch(17.1% 0.028 267);
-  --color-cyan: oklch(90.5% 0.155 195);
-  --color-blue: oklch(61.5% 0.211 256);
-  --color-alert: oklch(62.8% 0.258 29);
-  --color-ok: oklch(86.6% 0.295 142);
-  --color-danger-text: oklch(67.3% 0.215 25);
+  --hud-bg: oklch(17.1% 0.028 267);
+  --hud-cyan: oklch(90.5% 0.155 195);
+  --hud-blue: oklch(61.5% 0.211 256);
+  --hud-alert: oklch(62.8% 0.258 29);
+  --hud-ok: oklch(86.6% 0.295 142);
+  --hud-danger-text: oklch(67.3% 0.215 25);
 
-  /* Derivados (suposição de design: ver DESIGN.md) */
+  /* Semânticos */
+  --color-bg: var(--hud-bg);
   --color-surface: oklch(21.4% 0.033 241);
   --color-text: oklch(94.6% 0.015 251);
+  --color-heading: var(--color-text);
   --color-text-muted: oklch(90.5% 0.155 195 / 0.7);
+  --color-accent-text: var(--hud-cyan);
+  --color-primary: var(--hud-cyan);
+  --color-on-primary: var(--hud-bg);
+  --color-focus: var(--hud-cyan);
   --color-line: oklch(90.5% 0.155 195 / 0.5);
   --color-line-soft: oklch(90.5% 0.155 195 / 0.3);
   --color-grid: oklch(90.5% 0.155 195 / 0.04);
   --color-fill-soft: oklch(90.5% 0.155 195 / 0.1);
-  --color-glow: oklch(90.5% 0.155 195 / 0.6);
-  --color-glow-text: oklch(90.5% 0.155 195 / 0.5);
+  --color-field-bg: transparent;
+  --color-deco: var(--hud-cyan);
+  --color-glyph: var(--hud-ok);
+  --color-alert: var(--hud-alert);
+  --color-danger-text: var(--hud-danger-text);
+  --color-level-info: var(--hud-cyan);
+  --color-level-ok: var(--hud-ok);
+  --color-level-warn: var(--hud-blue);
+  --color-level-error: var(--hud-danger-text);
+  --color-wave: transparent;
 
-  /* Terminal (xterm lê estes tokens em runtime) */
-  --terminal-bg: var(--color-bg);
-  --terminal-fg: var(--color-text);
-  --terminal-ansi-black: oklch(40% 0.03 260);
-  --terminal-ansi-red: var(--color-danger-text);
-  --terminal-ansi-green: var(--color-ok);
-  --terminal-ansi-yellow: var(--color-blue);
-  --terminal-ansi-blue: var(--color-blue);
-  --terminal-ansi-magenta: var(--color-cyan);
-  --terminal-ansi-cyan: var(--color-cyan);
-  --terminal-ansi-white: var(--color-text);
+  /* Forma e efeitos */
+  --radius-panel: 0;
+  --radius-field: 0;
+  --radius-button: 0;
+  --shadow-panel: none;
+  --shadow-button: 0 0 16px oklch(90.5% 0.155 195 / 0.6);
+  --shadow-button-hover: 0 0 16px oklch(90.5% 0.155 195 / 0.6);
+  --text-glow: 0 0 10px oklch(90.5% 0.155 195 / 0.5);
+  --panel-border: 1px solid var(--color-line-soft);
+  --field-border-width: 1px;
+  --bracket-display: block;
+  --scan-display: block;
+  --dot-animation: blink 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  --dot-shadow: 0 0 10px var(--hud-cyan);
+  --level-dot-display: none;
+
+  /* Botões */
+  --button-secondary-fg: var(--hud-cyan);
+  --button-hover-bg: var(--hud-cyan);
+  --button-hover-fg: var(--hud-bg);
+  --button-font-size: 14px;
+  --button-weight: 400;
+  --button-transform: uppercase;
+  --button-tracking: 0.05em;
+  --button-padding: 0.75rem 2rem;
 
   /* Tipografia */
-  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-body: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-heading: var(--font-body);
+  --font-mono: var(--font-body);
+  --heading-weight: 500;
+  --label-size: 12px;
+  --label-transform: uppercase;
+  --label-tracking: 0.1em;
+  --label-weight: 400;
+  --readout-size: 30px;
+
+  /* Terminal (xterm lê estes tokens em runtime) */
+  --terminal-bg: var(--hud-bg);
+  --terminal-fg: var(--color-text);
+  --terminal-cursor: var(--hud-cyan);
+  --terminal-border: 1px solid var(--color-line);
+  --terminal-ansi-black: oklch(40% 0.03 260);
+  --terminal-ansi-red: var(--hud-danger-text);
+  --terminal-ansi-green: var(--hud-ok);
+  --terminal-ansi-yellow: var(--hud-blue);
+  --terminal-ansi-blue: var(--hud-blue);
+  --terminal-ansi-magenta: var(--hud-cyan);
+  --terminal-ansi-cyan: var(--hud-cyan);
+  --terminal-ansi-white: var(--color-text);
 
   /* Espaçamento (escala de 4) */
   --space-1: 4px;
@@ -46,4 +100,95 @@
   --space-4: 16px;
   --space-6: 24px;
   --space-8: 32px;
+  --panel-padding: var(--space-6);
+}
+
+/* ===== Tema Orgânico (claro, biofílico) ===== */
+:root[data-theme="organic"] {
+  color-scheme: light;
+
+  --org-forest: oklch(55.8% 0.169 143);
+  --org-bark: oklch(47.1% 0.112 51);
+  --org-sky: oklch(81.5% 0.082 226);
+  --org-linen: oklch(96.4% 0.033 107);
+  --org-olive: oklch(59.9% 0.137 126);
+  --org-goldenrod: oklch(75.2% 0.147 84);
+  --org-leaf-ink: oklch(39.3% 0.09 153);
+  --org-leaf-text: oklch(44.8% 0.108 151);
+  /* Derivado (suposição): a paleta não tem vermelho de erro */
+  --org-clay: oklch(47.4% 0.151 31);
+
+  --color-bg: var(--org-linen);
+  --color-surface: oklch(55.8% 0.169 143 / 0.1);
+  --color-text: var(--org-leaf-text);
+  --color-heading: var(--org-leaf-ink);
+  --color-text-muted: var(--org-bark);
+  --color-accent-text: var(--org-leaf-text);
+  --color-primary: var(--org-forest);
+  --color-on-primary: oklch(100% 0 0);
+  --color-focus: var(--org-leaf-ink);
+  --color-line: var(--org-leaf-text);
+  --color-line-soft: oklch(55.8% 0.169 143 / 0.3);
+  --color-grid: transparent;
+  --color-fill-soft: transparent;
+  --color-field-bg: oklch(100% 0 0 / 0.6);
+  --color-deco: var(--org-olive);
+  --color-glyph: var(--org-forest);
+  --color-alert: var(--org-clay);
+  --color-danger-text: var(--org-clay);
+  --color-level-info: var(--org-leaf-text);
+  --color-level-ok: var(--org-leaf-ink);
+  --color-level-warn: var(--org-bark);
+  --color-level-error: var(--org-clay);
+  --color-wave: oklch(55.8% 0.169 143 / 0.12);
+
+  --radius-panel: 24px;
+  --radius-field: 16px;
+  --radius-button: 9999px;
+  --shadow-panel: 0 8px 24px oklch(55.8% 0.169 143 / 0.12);
+  --shadow-button: 0 10px 30px oklch(55.8% 0.169 143 / 0.3);
+  --shadow-button-hover: none;
+  --text-glow: none;
+  --panel-border: none;
+  --field-border-width: 2px;
+  --bracket-display: none;
+  --scan-display: none;
+  --dot-animation: none;
+  --dot-shadow: none;
+  --level-dot-display: inline-block;
+
+  --button-secondary-fg: var(--org-leaf-text);
+  --button-hover-bg: var(--org-leaf-text);
+  --button-hover-fg: oklch(100% 0 0);
+  /* Branco sobre forest passa só como texto grande: 19px em negrito */
+  --button-font-size: 1.1875rem;
+  --button-weight: 700;
+  --button-transform: none;
+  --button-tracking: normal;
+  --button-padding: 1rem 2rem;
+
+  --font-body: system-ui, sans-serif;
+  --font-heading: Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --heading-weight: 400;
+  --label-size: 14px;
+  --label-transform: none;
+  --label-tracking: normal;
+  --label-weight: 600;
+  --readout-size: 40px;
+  --panel-padding: var(--space-8);
+
+  /* Terminal: ilha escura em leaf-ink */
+  --terminal-bg: var(--org-leaf-ink);
+  --terminal-fg: var(--org-linen);
+  --terminal-cursor: var(--org-sky);
+  --terminal-border: none;
+  --terminal-ansi-black: oklch(75% 0.05 155);
+  --terminal-ansi-red: oklch(80% 0.1 24);
+  --terminal-ansi-green: oklch(84% 0.135 140);
+  --terminal-ansi-yellow: oklch(86.4% 0.125 91);
+  --terminal-ansi-blue: var(--org-sky);
+  --terminal-ansi-magenta: oklch(82.6% 0.073 316);
+  --terminal-ansi-cyan: var(--org-sky);
+  --terminal-ansi-white: var(--org-linen);
 }

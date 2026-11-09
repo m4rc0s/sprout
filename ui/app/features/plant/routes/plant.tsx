@@ -48,11 +48,12 @@ function reducer(state: State, action: Action): State {
 export default function PlantRoute() {
   const [params] = useSearchParams();
   const scenario = params.get("cenario");
+  const theme = params.get("tema") === "organico" ? "organico" : "hud";
   const api = useMemo(() => createMockApi({ scenario: parseScenario(scenario) }), [scenario]);
 
   return (
     <ApiProvider value={api}>
-      <AppShell notice="Protótipo: os dados são simulados e nada é criado no seu computador.">
+      <AppShell theme={theme} notice="Protótipo: os dados são simulados e nada é criado no seu computador.">
         <PlantScreen />
       </AppShell>
     </ApiProvider>
