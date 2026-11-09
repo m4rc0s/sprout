@@ -1,0 +1,16 @@
+# The initiative's agreed epics, in build order. Approved by the user on 2026-11-08.
+
+[[epic]]
+id = 1
+slug = "epic-prototype-on-the-shell"
+title = "A screen you can judge before it is real"
+description = "The user opens the plant-and-watch screen on simulated data, styled by the approved DESIGN.md, and can walk every state (empty, planting, agent starting, live terminal, occupied destination, Herdr missing) to judge flow and look; the screen reaches Sprout only through the SproutApi interface the real server will implement."
+covers = ["R3", "R10"]
+
+[[epic]]
+id = 2
+slug = "epic-plant-and-watch-for-real"
+title = "Plant and watch on the real Herdr"
+description = "The same screen, started with sprout ui, plants a real project from pasted text, starts the agent, shows its terminal live and sends the user's keys to it, within about 15 seconds on the user's machine; the local server refuses visitors without the run's token."
+covers = ["R1", "R2", "R4", "R5", "R6", "R7", "R8", "R9"]
+after = [{ epic = 1, needs = "the user's approval of the screen's flow and look, and the SproutApi interface the real server implements" }]
