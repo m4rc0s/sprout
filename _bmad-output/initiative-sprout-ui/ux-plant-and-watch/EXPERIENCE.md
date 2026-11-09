@@ -96,6 +96,7 @@ Behavioral. Visual contrast is in `DESIGN.md`.
 - Level is conveyed by text marker as well as color.
 - The terminal has an accessible name, and the keyboard-exit chord is documented on screen.
 - The status dot, scan line and sprout glyph are `aria-hidden`.
+- Any icon-only control has an accessible name (`aria-label`). The MVP has none yet (every control carries text), and phase 2 icon buttons must follow this.
 - Reduced motion turns off every animation; the screen stays complete without them.
 
 ## Responsive & Platform
