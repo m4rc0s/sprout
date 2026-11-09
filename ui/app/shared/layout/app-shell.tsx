@@ -30,6 +30,7 @@ export function AppShell({ notice, theme = "hud", children }: AppShellProps) {
           <a href="?tema=organico" aria-current={theme === "organico" ? "page" : undefined}>
             Orgânico
           </a>
+          <a href="/astryx">Astryx</a>
         </nav>
         <Wave />
       </header>

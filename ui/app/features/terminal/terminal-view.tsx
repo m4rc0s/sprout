@@ -33,12 +33,12 @@ export default function TerminalView({ transport, label = "Terminal do agente", 
       ]);
       if (disposed) return;
 
-      const color = (token: string) => resolveCssColor(token);
+      const color = (token: string) => resolveCssColor(token, container);
       const terminal = new Terminal({
         convertEol: true,
         cursorBlink: true,
         rows: 18,
-        fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace",
+        fontFamily: getComputedStyle(container).getPropertyValue("--font-mono") || "ui-monospace, monospace",
         fontSize: 13,
         theme: {
           background: color("--terminal-bg"),

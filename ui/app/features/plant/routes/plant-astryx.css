@@ -1,0 +1,22 @@
+/* Só o que o Astryx não cobre: a moldura escura do terminal e o fundo da página. Cores vêm dos tokens do Astryx. */
+.astryx-page {
+  min-height: 100vh;
+  background: var(--color-background-body);
+  color: var(--color-text-primary);
+}
+.astryx-container {
+  box-sizing: border-box;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 24px;
+}
+.astryx-terminal {
+  padding: 8px;
+  border-radius: 12px;
+  background: var(--terminal-bg);
+}
+.astryx-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

@@ -1,9 +1,5 @@
 import type { LogLevel } from "~/features/plant/api/types";
-
-export interface LogEntry {
-  level: LogLevel;
-  line: string;
-}
+import type { LogEntry } from "~/features/plant/lib/use-plant-flow";
 
 interface PlantLogProps {
   entries: LogEntry[];

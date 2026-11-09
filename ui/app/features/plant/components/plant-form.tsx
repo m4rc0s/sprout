@@ -1,14 +1,6 @@
-import { useRef, useState } from "react";
-import { suggestDest, validateDest, type DestIssue } from "~/features/plant/lib/suggest";
+import { useRef } from "react";
+import { AGENT_OPTIONS, usePlantForm } from "~/features/plant/lib/use-plant-form";
 import type { AgentChoice, PlantRequest } from "~/features/plant/api/types";
-
-const AGENTS: AgentChoice[] = ["auto", "claude", "agy", "codex", "nenhum"];
-
-const DEST_MESSAGES: Record<DestIssue, string> = {
-  empty: "Informe o diretório de destino.",
-  relative: "Use um caminho absoluto ou iniciando em ~/.",
-  traversal: "O caminho não pode conter “..”.",
-};
 
 interface PlantFormProps {
   disabled?: boolean;
@@ -17,23 +9,14 @@ interface PlantFormProps {
 
 /** Texto do projeto, destino sugerido, agente e o botão que planta. */
 export function PlantForm({ disabled = false, onSubmit }: PlantFormProps) {
-  const [text, setText] = useState("");
-  const [destOverride, setDestOverride] = useState<string | null>(null);
-  const [agent, setAgent] = useState<AgentChoice>("auto");
-  const [submitted, setSubmitted] = useState(false);
+  const form = usePlantForm(onSubmit);
   const textRef = useRef<HTMLTextAreaElement>(null);
-
-  // Derivado na renderização: enquanto o usuário não edita o destino, ele segue o título.
-  const dest = destOverride ?? suggestDest(text);
-  const textIssue = text.trim() ? null : "Cole ou escreva a ideia do projeto.";
-  const destIssue = validateDest(dest);
-  const valid = !textIssue && !destIssue;
 
   const handleDrop = async (event: React.DragEvent<HTMLTextAreaElement>) => {
     const file = event.dataTransfer.files[0];
     if (!file || !/\.(md|markdown|txt)$/i.test(file.name)) return;
     event.preventDefault();
-    setText(await file.text());
+    form.setText(await file.text());
   };
 
   return (
@@ -42,12 +25,7 @@ export function PlantForm({ disabled = false, onSubmit }: PlantFormProps) {
       noValidate
       onSubmit={(event) => {
         event.preventDefault();
-        setSubmitted(true);
-        if (!valid) {
-          textRef.current?.focus();
-          return;
-        }
-        onSubmit({ text, dest: dest.trim(), agent });
+        if (!form.submit()) textRef.current?.focus();
       }}
     >
       <div className="stack">
@@ -57,11 +35,11 @@ export function PlantForm({ disabled = false, onSubmit }: PlantFormProps) {
           className="field"
           ref={textRef}
           rows={14}
-          value={text}
+          value={form.text}
           disabled={disabled}
-          aria-invalid={submitted && textIssue ? true : undefined}
+          aria-invalid={form.textMessage ? true : undefined}
           aria-describedby="project-text-hint"
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => form.setText(event.target.value)}
           onDrop={handleDrop}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
@@ -70,8 +48,8 @@ export function PlantForm({ disabled = false, onSubmit }: PlantFormProps) {
             }
           }}
         />
-        <small id="project-text-hint" className={submitted && textIssue ? "field-message" : "hint"}>
-          {submitted && textIssue ? `[erro] ${textIssue}` : `${text.length} caracteres. Você também pode arrastar um arquivo .md.`}
+        <small id="project-text-hint" className={form.textMessage ? "field-message" : "hint"}>
+          {form.textMessage ? `[erro] ${form.textMessage}` : `${form.text.length} caracteres. Você também pode arrastar um arquivo .md.`}
         </small>
 
         <label className="label" htmlFor="project-dest">Destino</label>
@@ -79,25 +57,25 @@ export function PlantForm({ disabled = false, onSubmit }: PlantFormProps) {
           id="project-dest"
           className="field"
           type="text"
-          value={dest}
+          value={form.dest}
           disabled={disabled}
-          aria-invalid={submitted && destIssue ? true : undefined}
+          aria-invalid={form.destMessage ? true : undefined}
           aria-describedby="project-dest-hint"
-          onChange={(event) => setDestOverride(event.target.value)}
+          onChange={(event) => form.setDest(event.target.value)}
         />
-        <small id="project-dest-hint" className={submitted && destIssue ? "field-message" : "hint"}>
-          {submitted && destIssue ? `[erro] ${DEST_MESSAGES[destIssue]}` : "Sugerido a partir do título do texto."}
+        <small id="project-dest-hint" className={form.destMessage ? "field-message" : "hint"}>
+          {form.destMessage ? `[erro] ${form.destMessage}` : "Sugerido a partir do título do texto."}
         </small>
 
         <label className="label" htmlFor="project-agent">Agente</label>
         <select
           id="project-agent"
           className="field"
-          value={agent}
+          value={form.agent}
           disabled={disabled}
-          onChange={(event) => setAgent(event.target.value as AgentChoice)}
+          onChange={(event) => form.setAgent(event.target.value as AgentChoice)}
         >
-          {AGENTS.map((option) => (
+          {AGENT_OPTIONS.map((option) => (
             <option key={option} value={option}>
               {option}
             </option>
