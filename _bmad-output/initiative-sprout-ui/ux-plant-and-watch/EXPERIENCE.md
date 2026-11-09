@@ -10,7 +10,7 @@ updated: 2026-11-08
 
 ## Foundation
 
-Local web app, desktop browser first, started with `sprout ui` and served on this machine only. One screen for the MVP, "Plantar e assistir". The UI is a React Router 7 single-page app already scaffolded in `ui/`; it reaches Sprout only through the `SproutApi` interface, so the same screen runs on simulated data (`?cenario=ok|erro|sem-herdr`) or on the real server. `DESIGN.md` is the visual identity reference and owns every color, type and shape; this spine owns behavior. Tokens are referenced by name, e.g. `{colors.cyan}`.
+Local web app, desktop browser first, started with `sprout ui` and served on this machine only. One screen for the MVP, "Plantar e assistir". The UI is a React Router 7 single-page app already scaffolded in `ui/`; it reaches Sprout only through the `SproutApi` interface, so the same screen runs on simulated data (`?cenario=ok|erro|sem-herdr`) or on the real server. The UI system is Astryx as shipped (neutral theme, mode follows the system); `DESIGN.md` records that there is no brand layer, so this spine owns behavior and wording only.
 
 ## Information Architecture
 
@@ -27,11 +27,11 @@ The screen has a header (name, and a notice line when data is simulated) and two
 
 Every stated need has a place: pasting and choosing (Projeto), seeing progress and failure (Agente log), talking to the agent (Agente terminal). Out of this spine, phase 2: recent projects, session list and actions, handoff and task tabs.
 
-→ The look of each region is in `DESIGN.md` (panels, fields, buttons, log, terminal). Spine wins on conflict.
+→ The components of each region are listed in `DESIGN.md`. Spine wins on conflict.
 
 ## Voice and Tone
 
-Portuguese (pt-BR), short, active, specific. Controls say what happens; errors say what went wrong and what to do next. No apologies, no exclamation marks, no emoji. Brand voice is in `DESIGN.md`.
+Portuguese (pt-BR), short, active, specific. Controls say what happens; errors say what went wrong and what to do next. No apologies, no exclamation marks, no emoji.
 
 | Do | Don't |
 |---|---|
@@ -44,15 +44,15 @@ Portuguese (pt-BR), short, active, specific. Controls say what happens; errors s
 
 ## Component Patterns
 
-Behavioral. Visual specs are in `DESIGN.md.Components`.
+Behavioral. Components and their props are in `DESIGN.md` and the Astryx docs.
 
 | Component | Behavior |
 |---|---|
-| Markdown field | Any length. Counter shows characters. A `.md`, `.markdown` or `.txt` file dropped on it replaces the content. `Ctrl+Enter` submits. [ASSUMPTION] |
-| Destination field | Suggested from the first `#` title (else the first line), as `~/workspace/<slug>`. Follows the title until the user edits it; after an edit it stays. Validated on submit: empty, relative, `..` and (real server) occupied are refused with a message that names the problem and the fix. |
-| Agent select | `auto`, `claude`, `agy`, `codex`, and `nenhum` (create the repository only). Default `auto`. |
-| Plantar button | One primary action. Disabled while planting. Pressing it with an invalid form focuses the first invalid field; nothing is sent. |
-| Plant log | Lines appear in the order the steps happen, each with its text marker. Announced politely to assistive technology. Never auto-scrolls while the user has scrolled up. |
+| Markdown field (`TextArea`) | Any length. The description shows the character count. `Ctrl+Enter` submits. [ASSUMPTION] Dropping a `.md` file is wanted but not built in the Astryx screen yet. |
+| Destination field (`TextInput`) | Suggested from the first `#` title (else the first line), as `~/workspace/<slug>`. Follows the title until the user edits it; after an edit it stays. Validated on submit: empty, relative, `..` and (real server) occupied are refused with a message that names the problem and the fix. |
+| Agent select (`Selector`) | `auto`, `claude`, `agy`, `codex`, and `nenhum` (create the repository only). Default `auto`. |
+| Plantar button | One primary `Button`. Shows its loading state while planting. Pressing it with an invalid form focuses the first invalid field; nothing is sent. |
+| Plant log | Lines appear in the order the steps happen, each with its text marker and a `StatusDot`. Announced politely to assistive technology. |
 | Terminal | Shows the agent's output and sends what the user types, including Enter, arrows, Tab, Esc and Ctrl-C. Output follows the agent within about one second. Has a visible exit hint (see Interaction Primitives). |
 | Summary (Projeto, after planting) | One line with destination and agent, plus "Plantar outro", shown only when no plant is running. |
 
@@ -61,9 +61,9 @@ Behavioral. Visual specs are in `DESIGN.md.Components`.
 | State | Where | Treatment |
 |---|---|---|
 | Empty | Projeto and Agente | Form ready; Agente says "O progresso e o terminal do agente aparecem aqui depois de plantar." |
-| Planting | Projeto summary, Agente log | Form hidden behind the summary, fields not editable; log fills line by line; scan line and sprout glyph run (decorative, off under reduced motion) |
+| Planting | Projeto summary, Agente log | Form replaced by the summary; a `Spinner` with "Plantando…" and the log filling line by line |
 | Agent starting | Agente | Last log line says the agent was started; "Abrindo terminal…" until the agent is found, with a time limit |
-| Live | Agente | Terminal shown beside the finished log; status dot blinks |
+| Live | Agente | Terminal shown under the finished log; a pulsing `StatusDot` marks the running agent |
 | Destination occupied | Projeto | Form returns with the error above it naming the destination; the text the user pasted is kept |
 | Herdr missing | Agente | Log ends with an `[aviso]` line; message says the project was created and how to continue in a terminal; no terminal is shown |
 | Agent not found in time | Agente | Message says the project exists but no agent appeared, with the way to start one; log stays |
@@ -82,7 +82,7 @@ The created project is never hidden: every failure after the repository exists s
 - **Leaving the terminal.** The terminal receives Tab, Esc and arrows, so it would trap the keyboard. A chord that is not forwarded to the agent leaves it: `Ctrl+Shift+Space`, with the hint "Ctrl+Shift+Espaço sai do terminal" always shown under it. [ASSUMPTION] The architecture must implement this in the terminal component.
 - Drag and drop of a file onto the field is an alternative, never the only way.
 
-**Motion.** Decorative only, off under `prefers-reduced-motion`: the status dot blink, the scan line, the sprout glyph. Readable text never moves or blinks. No ticker.
+**Motion.** Only what Astryx components do (the spinner, the pulsing status dot), which respect reduced motion. Readable text never moves or blinks.
 
 **Banned:** celebratory animations, sound, notifications, hover-only affordances, any modal stack deeper than one level.
 
@@ -95,9 +95,8 @@ Behavioral. Visual contrast is in `DESIGN.md`.
 - Errors are announced and tied to their field (`aria-invalid`, `aria-describedby`); the first invalid field takes focus on a refused submit.
 - Level is conveyed by text marker as well as color.
 - The terminal has an accessible name, and the keyboard-exit chord is documented on screen.
-- The status dot, scan line and sprout glyph are `aria-hidden`.
 - Any icon-only control has an accessible name (`aria-label`). The MVP has none yet (every control carries text), and phase 2 icon buttons must follow this.
-- Reduced motion turns off every animation; the screen stays complete without them.
+- Astryx components meet WCAG AA and reduced motion as documented; Sprout adds no animation of its own.
 
 ## Responsive & Platform
 
@@ -110,9 +109,8 @@ Desktop browsers only; the screen is not designed or tested for phones.
 
 ## Inspiration & Anti-patterns
 
-- **Lifted:** movie FUI instrument panels (thin lines, corner brackets, a single moment of glow); terminal multiplexers for the idea that the terminal is the product's heart and the UI frames it.
+- **Lifted:** terminal multiplexers, for the idea that the terminal is the product's heart and the UI frames it.
 - **Rejected — ticker of readable text:** the log must be readable, so it never scrolls on its own.
-- **Rejected — glow or neon on long text:** the markdown field and the log are read for minutes.
 - **Rejected — celebration on success:** planting is the beginning of the work, not an achievement.
 - **Rejected — a wizard:** one screen, one action; no steps to click through.
 
@@ -136,6 +134,6 @@ Failure: the destination already exists. The form comes back with "O destino ~/w
 
 ## Open Items
 
-- [ASSUMPTION] Every `[ASSUMPTION]` in this file and in `DESIGN.md` is the assistant's answer on the user's delegation and needs the user's confirmation: HUD as identity, dark only, green as semantic ok, calm treatment of the markdown field, no ticker, minimal motion, `Ctrl+Enter` to submit, `Ctrl+Shift+Space` to leave the terminal, the `nenhum` agent option and the derived palette values.
-- For architecture: the terminal component implements the exit chord; the font may be bundled or only named.
+- [ASSUMPTION] Behaviors added by Sally and still to confirm with the user: `Ctrl+Enter` to submit, `Ctrl+Shift+Space` to leave the terminal, the `nenhum` agent option.
+- For architecture: the terminal component implements the exit chord (done in the prototype); the theme's web font is not loaded.
 - For the ticket: the "pane closed" and "agent not found in time" states and the `nenhum` agent option are not worded in R5/R8 yet; Sofia should fold them in when the spines are approved.

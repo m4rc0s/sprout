@@ -11,7 +11,7 @@ Este arquivo tem duas partes:
 ## Passo 0.5 (pedido do usuário): protótipo clicável para validar a proposta
 Antes de qualquer código real, um **protótipo em HTML único** (Artifact privado, sem backend) com a tela "Plantar e assistir" **simulada**: colar texto → destino/nome sugeridos → Plantar → log de plantio em stream → terminal do agente aparece e aceita digitação (eco simulado). Serve só para validar fluxo e sensação, não é código de produção.
 - **Dois visuais alternáveis** por um seletor: "HUD" (o estilo sci-fi colado pelo usuário, já com as adaptações da Sally: borda de campos/botões ≥3:1, texto longo neutro, log estático, sem ticker no texto legível, `prefers-reduced-motion`) e "Calmo" (neutro, sóbrio), para comparar lado a lado.
-- Cores como variáveis CSS (espelha a regra de tokens); ícones SVG inline no traço do lucide; sem emoji.
+- (Atualizado em 2026-11-08) Protótipo feito sobre a casca real com o Astryx como veio; HUD e Orgânico foram prototipados e descartados.
 - Estados navegáveis: vazio, plantando, agente subindo, terminal ao vivo, erro (destino ocupado), Herdr ausente.
 - Registrar no protótipo o que é simulado. Feedback do usuário volta para o `DESIGN.md`/`EXPERIENCE.md` (Etapa 2).
 
@@ -31,7 +31,7 @@ Lista de projetos recentes, lista/gestão de sessões (retomar, nova, parar, rem
 
 ## Fundação (mínima, sustenta o fluxo e a Fase 2)
 1. **BMad no repo + config de agente** (Etapas 0 e 5 da Parte A, em versão compacta).
-2. **`ui/` limpo:** remover Storybook (`@storybook/*`, `.storybook/`, scripts); manter RR7 SPA, Vite, Tailwind, Radix/shadcn, lucide, zod, xterm, bun test. Um `tokens.css` (OKLCH, claro/escuro) derivado do `DESIGN.md` aprovado.
+2. **`ui/` limpo:** RR7 SPA, Vite, Astryx (core + theme-neutral), zod, xterm, bun test. Sem Storybook, Tailwind, Radix, lucide nem `tokens.css`: a identidade visual é o Astryx como veio (`DESIGN.md`).
 3. **Servidor Bun** (`ui/server/`): `Bun.serve` em `127.0.0.1`, token por execução + cookie `SameSite=Strict`, validação de `Origin`/`Host`, servir `ui/build/client`; runners `sprout()` e `herdr()` que usam **argv sem shell**; payloads com `zod`.
 4. **Subcomando `sprout ui`** em `bin/sprout`: checa `bun`; se não houver build, orienta `cd ui && bun install && bun run build`; sobe o servidor, imprime a URL com token, abre o navegador (`--port`, `--no-open`).
 
@@ -47,7 +47,7 @@ Lista de projetos recentes, lista/gestão de sessões (retomar, nova, parar, rem
 
 **Fatia 3 — Terminal ao vivo (espelho + teclado).**
 - `WS /ws/terminal/:pane`: enquanto houver cliente, `herdr pane read <pane> --source visible --ansi` a cada ~300 ms; envia só quando o hash muda. Entrada: `send-text` para texto literal e `send-keys` para Enter, setas, Tab, Esc, Ctrl-C (tabela de mapeamento testada). Pane inexistente/fechado: estado vazio claro.
-- UI: componente `TerminalView` (xterm, carregado com `React.lazy`), painel ao lado do formulário, que se recolhe em um resumo "Spec enviada" após o plantio. Cores do terminal lidas dos tokens.
+- UI: componente `TerminalView` (xterm, carregado com `React.lazy`), painel ao lado do formulário, que se recolhe em um resumo "Spec enviada" após o plantio. Cores do terminal lidas dos tokens do Astryx.
 - Limite honesto documentado na UI: ~300 ms de latência e snapshot, não stream.
 
 ## Etapas BMad (compactas; cada uma para no usuário)
@@ -59,7 +59,7 @@ Lista de projetos recentes, lista/gestão de sessões (retomar, nova, parar, rem
 5. **Config de agente (`bmad-project-context`):** `AGENTS.md` + `CLAUDE.md` curto do Sprout com as regras da Parte A. Cada escrita é aprovada pelo usuário.
 
 ## Ordem de execução
-0) Salvar a Parte A em `docs/plans/sprout-ui-reference.md` (commit `docs`). → BMad setup → ticket → UX → arquitetura (paradas) → limpar `ui/` + fundação (servidor, `sprout ui`, tokens) → Fatia 1 → 2 → 3 → config de agente → docs/README (`docs/ui.md`) → PR empilhado sobre `feat/plant-from-prompt`, **sem merge sem o aval do usuário**.
+0) Salvar a Parte A em `docs/plans/sprout-ui-reference.md` (commit `docs`). → BMad setup → ticket → UX → arquitetura (paradas) → limpar `ui/` + fundação (servidor, `sprout ui`) → Fatia 1 → 2 → 3 → config de agente → docs/README (`docs/ui.md`) → PR empilhado sobre `feat/plant-from-prompt`, **sem merge sem o aval do usuário**.
 
 ## Verificação
 1. Antes de cada commit: `cd ui && bun run typecheck && bun test` verdes; build sem erro; grep de cor hardcoded e de barrel files vazios; `bash -n bin/sprout`.
@@ -78,7 +78,7 @@ O Sprout é 100% CLI. A UI completa permite: criar projeto (do zero, de texto ma
 - **Método BMad completo com as skills** (`bmad-ux` → `bmad-architecture` → `bmad-build`), conversando com o usuário.
 - **Dos repos `finance_tool` e `ft_bpo_shell`: nenhuma implementação, paleta ou código.** Só as configs de agente do `ft_bpo_shell` (AGENTS.md, CLAUDE.md, `.claude/`, `.agents/`), adaptadas.
 - **Do catálogo (`marcos_dev_catalog.md`) entram somente as regras de performance e de Git.** Fora: Storybook/CDD, padrões de composição e as demais diretrizes de UI do catálogo.
-- **Stack:** Bun · TypeScript 5.x · React 19 · React Router v7 SPA mode (`ssr: false`) · Vite · Tailwind + `tailwindcss-animate` · shadcn "new-york" sobre Radix · `lucide-react` · `class-variance-authority` + `clsx` + `tailwind-merge` · `zod` · `bun test` + Testing Library + happy-dom · Playwright · `@xterm/xterm` + `@xterm/addon-fit` · servidor Bun (REST + WebSocket) · tokens OKLCH sem cor hardcoded. O spine de arquitetura ratifica; não reabre a stack sozinho.
+- **Stack (atualizada em 2026-11-08):** Bun · TypeScript 5.x · React 19 · React Router v7 SPA mode (`ssr: false`) · Vite · **Astryx como veio** (`@astryxdesign/core` + `theme-neutral`, StyleX como peer, sem camada de marca) · `zod` · `bun test` + Testing Library + happy-dom · Playwright · `@xterm/xterm` + `@xterm/addon-fit` · servidor Bun (REST + WebSocket). Sem Tailwind, Radix, shadcn nem lucide-react. O spine de arquitetura ratifica; não reabre a stack sozinho.
 
 ## Regras mantidas do catálogo
 **Performance:** `Promise.all` para I/O independente; `await` só onde o dado é usado; sem barrel files; `React.lazy`/`import()` em modais e rotas secundárias; estado derivado na renderização (sem `useEffect` de sincronização); `useState(() => …)` para estado pesado; `useRef` para contadores/transições.

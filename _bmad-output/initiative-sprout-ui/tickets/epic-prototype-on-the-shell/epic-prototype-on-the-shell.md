@@ -15,7 +15,7 @@ refined: false
 
 ## Description
 
-The unstyled shell in `ui/` (commit `2c53524`) already runs the plant-and-watch flow on a mock. This epic gives it its look and its finished behavior: the UX spines from the Sally run (`DESIGN.md`, `EXPERIENCE.md`) are approved, the token file carries the visual identity, and every state of the flow can be reached by the user through the scenario switch (`?cenario=`), so the proposal can be judged before any server exists. The real server and Herdr arrive in the next epic, which replaces the mock behind the same `SproutApi` interface.
+The shell in `ui/` (commit `2c53524`) already runs the plant-and-watch flow on a mock. This epic gives it its look and its finished behavior: the UX spines from the Sally run (`DESIGN.md`, `EXPERIENCE.md`) are approved, the screen is built with the Astryx design system as shipped, and every state of the flow can be reached by the user through the scenario switch (`?cenario=`), so the proposal can be judged before any server exists. The real server and Herdr arrive in the next epic, which replaces the mock behind the same `SproutApi` interface.
 
 ## Outcome
 
@@ -23,7 +23,7 @@ For the user, the plant-and-watch screen can be opened and walked through in eve
 
 ## Done when
 
-- `DESIGN.md` and `EXPERIENCE.md` are approved and the screen takes its colors, type and spacing only from the token file.
+- `DESIGN.md` and `EXPERIENCE.md` are approved and the screen is built only from Astryx components, with no Sprout-owned colors, type or spacing.
 - The scenarios `ok`, `erro` and `sem-herdr` each show their states, with the text and recovery the experience spine defines.
 - Destination and name suggestions and the refusals of an invalid destination behave as R3 states, on the screen.
 - The form, the log and every state are operable by keyboard and announced to assistive technology, with motion off under reduced-motion (the screen's part of R10).
@@ -32,7 +32,7 @@ For the user, the plant-and-watch screen can be opened and walked through in eve
 ## Boundaries
 
 - Belongs to the next epic: the server, `sprout ui`, the real plant, the agent lookup, the live terminal transport, keyboard input inside the terminal (R7) and the token check (R1).
-- Touch point: `ui/` shell — page, `SproutApi` interface and mock are used and styled here; owner: this epic
+- Touch point: `ui/` shell — page, `SproutApi` interface and mock are used here; owner: this epic
 - Must not change: the `SproutApi` contract, except to add what the screen proves it lacks, recorded for epic 2.
 
 ## References

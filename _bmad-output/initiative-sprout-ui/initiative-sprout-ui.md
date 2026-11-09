@@ -36,11 +36,11 @@ For a developer with an idea written as text, going from "pasted" to "an agent i
 
 - C1 (plan: Arquitetura de alto nível): Every change to Sprout state (create the project, start the agent) goes through the `sprout` CLI; the UI server does not reimplement it. It reads from Herdr, git and `.sprout` files.
 - C2 (plan: Segurança): Local only: bound to 127.0.0.1, per-run token, Origin and Host validated, user text never interpolated into a command line, request payloads validated against a schema, destination paths validated.
-- C3 (planning session, UX): Visual identity enters only through the token file defined by `DESIGN.md`: OKLCH tokens, no hardcoded colors in components, `lucide-react` icons only, no emoji, WCAG AA, reduced-motion respected.
+- C3 (UX decision 2026-11-08): The visual identity is the Astryx design system as shipped (neutral theme, mode follows the system): Sprout defines no color, type, spacing or radius of its own, the screen is built from Astryx components and tokens, never hardcoded colors or Sprout-owned stylesheets, and WCAG AA and reduced motion come from Astryx components.
 - C4 (plan: Regras mantidas do catálogo): Performance: independent I/O in parallel, no barrel files, heavy modules (the terminal) loaded on demand, state derived at render, no effect-based syncing.
 - C5 (plan: Regras mantidas do catálogo; agent configs of ft_bpo_shell): Git: branch only, never `main`, Conventional Commits in English, tests and typecheck green before each commit, merge only with the user's explicit approval.
 - C6 (planning session, shell first): The screen talks to Sprout only through the `SproutApi` interface; the mock (scenarios `ok`, `erro`, `sem-herdr` via `?cenario=`) and the real implementation are interchangeable, and the prototype lives inside the product's structure, not beside it.
-- C7 (plan: Decisões do usuário): Stack fixed to the first proposal and only ratified by the architecture spine: Bun, TypeScript, React 19, React Router 7 SPA, Vite, Tailwind, `bun test`; the terminal is xterm in mirror-plus-keyboard form (`herdr pane read --ansi`, `send-text`, `send-keys`).
+- C7 (UX decision 2026-11-08): Stack fixed and only ratified by the architecture spine: Bun, TypeScript, React 19, React Router 7 SPA, Vite, Astryx (core and theme-neutral, StyleX as peer), zod, `bun test`; the terminal is xterm in mirror-plus-keyboard form (`herdr pane read --ansi`, `send-text`, `send-keys`). Tailwind, Radix, shadcn and lucide-react are not used.
 
 ## Done when
 
@@ -48,7 +48,7 @@ For a developer with an idea written as text, going from "pasted" to "an agent i
 - A reply typed in the embedded terminal reaches the agent and its answer appears (R7).
 - The occupied-destination, missing-Herdr and agent-not-found cases each show an actionable message and nothing created is hidden (R3, R4, R8).
 - Requests without the token, or from a foreign origin, are refused (R1).
-- `DESIGN.md` and `EXPERIENCE.md` are approved and the screen takes its look only from the token file (R10, C3).
+- `DESIGN.md` and `EXPERIENCE.md` are approved and the screen is built only from Astryx components, with no Sprout-owned styling (R10, C3).
 - Typecheck, tests and build are green on the branch, and the user has validated the flow in real Herdr.
 
 ## Boundaries
@@ -73,7 +73,7 @@ Out of this initiative, dated 2026-11-08: recent projects, the session list and 
 - Assumption: `sprout plant` runs correctly when started by a server process with no TTY and stdin closed; the tracer slice proves it first.
 - Assumption: the agent started by `plant` is found by matching the agent list's working directory to the destination.
 - Assumption: the 15-second target is measured on the user's machine with Herdr already running and a local destination.
-- Open question: visual identity: is the HUD / sci-fi style the identity or a reference, dark only, green as the brand color, treatment of the long markdown field, ticker, amount of motion. Waits on: the UX run (Sally).
+- Decision: the visual identity is Astryx as shipped; the HUD and Organic Biophilic styles were prototyped and dropped (2026-11-08).
 - Open question: does `_bmad/` go into git or into `.gitignore`. Waits on: the user.
 - Decision: sliced into two epics, prototype first then real, because the prototype is an early-usable part with a distinct outcome the user wants to judge first (2026-11-08).
 - Decision: no platform-baseline epic; the app shell was delivered before the initiative (commit `2c53524`, branch `feat/sprout-ui`) (2026-11-08).

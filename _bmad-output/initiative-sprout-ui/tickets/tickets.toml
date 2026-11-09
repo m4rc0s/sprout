@@ -4,7 +4,7 @@
 id = 1
 slug = "epic-prototype-on-the-shell"
 title = "A screen you can judge before it is real"
-description = "The user opens the plant-and-watch screen on simulated data, styled by the approved DESIGN.md, and can walk every state (empty, planting, agent starting, live terminal, occupied destination, Herdr missing) to judge flow and look; the screen reaches Sprout only through the SproutApi interface the real server will implement."
+description = "The user opens the plant-and-watch screen on simulated data, built with Astryx as shipped, and can walk every state (empty, planting, agent starting, live terminal, occupied destination, Herdr missing) to judge flow and look; the screen reaches Sprout only through the SproutApi interface the real server will implement."
 covers = ["R3", "R10"]
 
 [[epic]]
