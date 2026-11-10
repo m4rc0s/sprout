@@ -3616,6 +3616,24 @@ fi
       ln -sfn "$bmad_user_file" "$target/$bmad_rel"
     done < <(find "$repo/_bmad/custom" -name '*.user.toml' -print0 2>/dev/null)
   fi
+
+  # Some users never `git add` the rest of _bmad/ (e.g. a project-scoped
+  # BMad install kept out of version control entirely), so `git worktree
+  # add` has no tracked blob to check it out from either. Copy whatever is
+  # untracked-but-not-gitignored under _bmad/ in — not symlink — so each
+  # worktree gets its own frozen snapshot, same as a tracked file would.
+  # A symlink would mean a `bmad migrate` or `npx skills update` run against
+  # the base repo (or any other worktree) changes the installed scripts out
+  # from under an agent already mid-task in this one. Anything gitignored,
+  # including _bmad/custom/*.user.toml above, is intentionally skipped here:
+  # that one is meant to stay live and shared, which the symlink above
+  # already handles.
+  if [[ -d "$repo/_bmad" ]]; then
+    while IFS= read -r -d '' bmad_untracked_file; do
+      mkdir -p "$target/$(dirname "$bmad_untracked_file")"
+      cp -p "$repo/$bmad_untracked_file" "$target/$bmad_untracked_file"
+    done < <(git -C "$repo" ls-files --others --exclude-standard -z -- _bmad)
+  fi
 [[ -z "$project_name" ]] || printf 'Project: %s\n' "$project_name"
 [[ -z "$github_repo" ]] || printf 'GitHub: %s\n' "$github_repo"
 if [[ -n "$issue" ]]; then
