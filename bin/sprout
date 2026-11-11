@@ -10,23 +10,53 @@ auth_file="$config_dir/auth.toml"
 usage() {
   cat >&2 <<'HELP'
 Usage:
+  sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
+  sprout plant [SPEC_DOC] [DEST_DIR] [options]
+  sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
   sprout init
+  sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
+  sprout check-review [PR_NUMBER_OR_URL] [options]
+  sprout prune [TARGET] [options]
+  sprout <type> [TEXT | --context <TEXT>] [options]
   sprout <type> (--issue <ISSUE-KEY> | --feature <name>) [options]
 
+Tree Planting & Initialization:
+  sprout plant [URL|PATH|SPEC] [DIR] [options] Plant base repo from Git URL, local path, or spec doc (.md/.html)
+  sprout init                                  Interactive initialization inside an existing base repository
+
+Code Review Ingestion & Triage:
+  sprout check-review [PR|URL]                 Ingest PR feedback & inline comments and trigger BMad Triage (alias: review)
+
+Branch Synchronization:
+  sprout sync [options]                        Fetch latest origin/main and rebase current branch onto it (alias: rebase)
+
+Teardown:
+  sprout prune [TARGET] [options]              Close the Herdr workspace and remove the worktree, local branch, and
+                                                remote branch for a sprouted task (defaults to the current worktree)
+
+Session Management & Autonomous Watcher:
+  sprout session status                        View active agent session, pane, context metrics, and watcher state
+  sprout session recycle [options]             Snapshot state to .sprout/handoff.md and restart fresh agent session
+  sprout session watch [options]               Run non-LLM autonomous context watcher (--daemon, --status, --stop)
+
 Agent Management:
-  sprout agent status                          View agent telemetry, cooldowns, and live Herdr sessions
+  sprout agent status                          View agent telemetry, cooldowns, 5h-window headroom, and live sessions
   sprout agent cooldown <name> [--for <dur>]   Place agent in cooldown (e.g. --for 2h, --until 18:30)
   sprout agent reset [name]                    Clear cooldown for specified agent (or all agents)
 
 Types: feat, fix, doc, docs, style, refactor, perf, test, build, ci, chore, revert
 Options:
-  --issue KEY          Issue key (e.g. Jira); fetches details to generate branch slug and .sprout/issue.json
-  --feature NAME       Directory name; defaults to the issue key when --issue is used; lowercased with hyphens converted to underscores
-  --slug SLUG          Branch slug; defaults to the issue key when --issue is used, otherwise --feature; lowercased with hyphens converted to underscores
-  --base PATH          Base repository; defaults to current Git repo, then BASE_REPO, then ~/workspace/finance_tool
-  --dest PATH          Full worktree destination; defaults to sibling directory named after feature/key
-  -a, --agent NAME     Agent to launch in Herdr workspace (auto, claude, agy, codex, gemini). Default: auto
+  TEXT                 Optional positional text describing the task/goal (bypasses Jira)
+  -c, --context TEXT   Free-form task context (use '-' to read from stdin)
+  --context-file FILE  Read task context from a markdown or text file
+  -s, --spec PATH      Path to vision, PRD, or spec document (.md, .html) to bootstrap project from
+  -b, --branch BRANCH  Branch to checkout (used with plant; defaults to default branch or #branch in URL)
+  --dest PATH          Destination directory (defaults to repo name or derived project slug)
+  --name NAME          Project display name (defaults to repository name or document title)
+  -a, --agent NAME     Agent to launch in Herdr workspace (auto, claude, agy, codex). Default: auto (headroom-first router)
+  --model MODEL        Explicit model override (e.g. opus, sonnet, gemini-4-argon, gemini-3.8-flash, gpt-6-luna)
+  --effort LEVEL       Explicit reasoning effort override (high, medium, low)
   -m, --method NAME    Workflow/methodology template (bmad, scpe, none). Default: bmad
   --no-agent           Create worktree and Herdr workspace without launching an agent
   --no-herdr           Create worktree only without creating a Herdr workspace
@@ -36,17 +66,42 @@ Options:
 `sprout init` must be run inside the canonical base repository. It stores project name, GitHub repo,
 and defaults under shared Git metadata, and tracker credentials in $HOME/.sprout/auth.toml.
 
+`sprout prune` options:
+  TARGET               Worktree path, feature/directory name, or branch to prune (defaults to the
+                        current worktree; cannot target the base repository checkout)
+  -y, --yes            Skip the confirmation prompt
+  --force              Remove the worktree despite uncommitted or unpushed changes, and force-delete
+                        the local branch even if it isn't fully merged
+  --keep-branch        Do not delete the local Git branch
+  --keep-remote        Do not delete the matching branch on origin
+  --no-herdr           Do not close the associated Herdr workspace
+
 Examples:
-  sprout init
-  sprout agent status
-  sprout agent cooldown claude --for 2h --reason "5h token window reached"
-  sprout agent reset claude
+  # Plant a brand new project from a specification document:
+  sprout plant vision.md
+  sprout plant specs/prd.html ~/workspace/meu_app
+
+  # Plant from a remote repository:
+  sprout plant git@github.com:m4rc0s/sprout.git
+  sprout plant https://github.com/m4rc0s/sprout.git --branch develop
+
+  # Plant an existing repository and seed it with a spec document:
+  sprout plant git@github.com:org/repo.git --spec vision.md
+  sprout plant --spec vision.md
+
+  # Sprout worktrees:
+  sprout feat "Adicionar exportação CSV no relatório de vendas"
+  sprout fix "Deadlock no pool de conexões do postgres" --agent agy
+  sprout docs "Atualizar guia de onboarding e setup"
   sprout fix --issue FT-123
   sprout feat --issue FT-456 --agent agy --method scpe
-  sprout feat --issue FT-456 --feature ft_456 --slug loading_progress
-  sprout docs --feature guide-refresh --agent codex
+
+  # Tear down a finished worktree (run from inside it, or name it from elsewhere):
+  sprout prune
+  sprout prune ft_123 --yes
+  sprout prune ../finance_tool/csv_export --keep-remote
 HELP
-  exit 2
+  exit "${1:-2}"
 }
 
 resolve_repository() {
@@ -55,6 +110,1291 @@ resolve_repository() {
   common_dir=$(git -C "$requested" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   common_dir=$(cd "$common_dir" && pwd -P) || return 1
   printf '%s\n%s\n' "$(dirname "$common_dir")" "$common_dir"
+}
+
+evaluate_agent_routing() {
+  local task_type="${1:-task}"
+  local summary="${2:-}"
+  local description="${3:-}"
+  local issue_type="${4:-}"
+  local priority="${5:-}"
+  local status_file="${6:-}"
+  local cli_agent="${7:-}"
+  local default_agent="${8:-auto}"
+  local cli_model="${9:-}"
+  local cli_effort="${10:-}"
+  local config_file="${11:-}"
+
+  python3 - "$task_type" "$summary" "$description" "$issue_type" "$priority" "$status_file" "$cli_agent" "$default_agent" "$cli_model" "$cli_effort" "$config_file" <<'PYENGINE'
+import sys, json, os, subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+
+task_type = sys.argv[1].lower()
+summary = sys.argv[2]
+description = sys.argv[3]
+issue_type = sys.argv[4]
+priority = sys.argv[5]
+status_file_arg = sys.argv[6].strip()
+cli_agent = sys.argv[7].strip()
+default_agent = sys.argv[8].strip()
+cli_model = sys.argv[9].strip()
+cli_effort = sys.argv[10].strip()
+config_file_arg = sys.argv[11].strip()
+
+# Resolve status_file
+status_file = Path(status_file_arg) if status_file_arg else (Path.home() / ".sprout" / "agents_status.json")
+
+text = f"{task_type} {summary} {description}".lower()
+
+# Lexical signals for Complexity (C)
+high_complexity_terms = {
+    "concurrency": 4, "deadlock": 5, "race condition": 5, "memory leak": 5,
+    "mutex": 4, "transaction": 4, "cryptography": 4, "crypto": 3,
+    "jwt": 3, "distributed": 4, "migration": 3, "protocol": 3,
+    "ast": 4, "compiler": 4, "recursion": 3, "performance": 3,
+    "profiling": 3, "optimization": 3, "thread safe": 4, "lock": 3,
+    "deadlocks": 5, "bottleneck": 3, "leak": 4, "review": 2, "triage": 2
+}
+low_complexity_terms = {
+    "readme": -3, "docs": -3, "documentation": -4, "typo": -4,
+    "css": -3, "color": -3, "padding": -3, "margin": -3,
+    "style": -3, "lint": -4, "format": -3, "changelog": -4,
+    "bump": -4, "version": -3, "comment": -3, "guide": -2
+}
+
+# Uncertainty/Risk terms (U) -> Reasoning Effort
+uncertainty_terms = {
+    "investigate": 4, "debug": 4, "intermittent": 4, "flaky": 4,
+    "unknown": 3, "root cause": 4, "audit": 3, "security": 4,
+    "vulnerability": 4, "why": 3, "reproduce": 3, "edge case": 3,
+    "race condition": 3, "memory leak": 3, "deadlock": 3, "review": 2
+}
+mechanical_terms = {
+    "add field": -3, "rename": -3, "update text": -3, "boilerplate": -3,
+    "crud": -2, "copy": -2, "template": -2, "scaffold": -2
+}
+
+score_c = 0
+signals_c = []
+if task_type in {"feat", "fix", "refactor", "perf", "spike", "review", "recycle"}:
+    score_c += 1
+elif task_type in {"doc", "docs", "chore", "style", "ci"}:
+    score_c -= 2
+
+for term, weight in high_complexity_terms.items():
+    if term in text:
+        score_c += weight
+        signals_c.append(f"'{term}' (+{weight})")
+
+for term, weight in low_complexity_terms.items():
+    if term in text:
+        score_c += weight
+        signals_c.append(f"'{term}' ({weight})")
+
+itype = (issue_type or "").lower()
+if "bug" in itype:
+    score_c += 2
+    signals_c.append("Bug (+2)")
+elif "spike" in itype:
+    score_c += 3
+    signals_c.append("Spike (+3)")
+elif "review" in itype:
+    score_c += 2
+    signals_c.append("PR Review (+2)")
+elif "doc" in itype:
+    score_c -= 3
+    signals_c.append("Doc (-3)")
+
+prio = (priority or "").lower()
+if prio in {"critical", "highest"}:
+    score_c += 2
+    signals_c.append("Critical Priority (+2)")
+elif prio == "high":
+    score_c += 1
+    signals_c.append("High Priority (+1)")
+elif prio in {"low", "lowest"}:
+    score_c -= 1
+    signals_c.append("Low Priority (-1)")
+
+model_tier = "frontier" if score_c >= 4 else ("balanced" if score_c >= 1 else "fast")
+
+# Calculate Uncertainty (U)
+score_u = 0
+signals_u = []
+for term, weight in uncertainty_terms.items():
+    if term in text:
+        score_u += weight
+        signals_u.append(f"'{term}' (+{weight})")
+for term, weight in mechanical_terms.items():
+    if term in text:
+        score_u += weight
+        signals_u.append(f"'{term}' ({weight})")
+
+reasoning_effort = "high" if score_u >= 3 else ("medium" if score_u >= 0 else "low")
+if cli_effort:
+    reasoning_effort = cli_effort
+
+# Headroom & Status First Agent Selection
+# Priority 1: codex (free/included for user)
+# Priority 2: claude
+# Priority 3: agy
+default_state = {
+    "agents": {
+        "codex": {"priority": 1, "status": "available", "cooldown_until": None, "max_concurrency": 3, "tokens_consumed_window": 0, "window_limit_est": 500000},
+        "claude": {"priority": 2, "status": "available", "cooldown_until": None, "max_concurrency": 2, "tokens_consumed_window": 0, "window_limit_est": 200000},
+        "agy": {"priority": 3, "status": "available", "cooldown_until": None, "max_concurrency": 3, "tokens_consumed_window": 0, "window_limit_est": 300000}
+    }
+}
+data = default_state
+if status_file.exists():
+    try:
+        with open(status_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        data = default_state
+
+agents_data = data.setdefault("agents", default_state["agents"])
+
+# Ensure codex has top priority 1
+if "codex" in agents_data:
+    agents_data["codex"]["priority"] = 1
+    if agents_data["codex"].get("window_limit_est", 0) < 500000:
+        agents_data["codex"]["window_limit_est"] = 500000
+    if agents_data["codex"].get("max_concurrency", 0) < 3:
+        agents_data["codex"]["max_concurrency"] = 3
+if "claude" in agents_data:
+    agents_data["claude"]["priority"] = 2
+if "agy" in agents_data:
+    agents_data["agy"]["priority"] = 3
+
+now = datetime.now().astimezone()
+
+herdr_counts = {}
+try:
+    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+    h_data = json.loads(out)
+    for ag in (h_data.get("result") or {}).get("agents") or []:
+        k = ag.get("agent")
+        st = (ag.get("agent_status") or "").lower()
+        if k and st in ("working", "busy"):
+            herdr_counts[k] = herdr_counts.get(k, 0) + 1
+except Exception:
+    pass
+
+selected_agent = ""
+agent_rationale = ""
+
+if cli_agent and cli_agent != "auto":
+    selected_agent = cli_agent
+    agent_rationale = f"Explicit override via -a {cli_agent}"
+elif default_agent and default_agent != "auto":
+    selected_agent = default_agent
+    agent_rationale = f"Project config default: {default_agent}"
+else:
+    candidates = []
+    for name, info in agents_data.items():
+        cd = info.get("cooldown_until")
+        if cd:
+            try:
+                cd_dt = datetime.fromisoformat(cd)
+                if cd_dt > now:
+                    continue
+                else:
+                    info["status"] = "available"
+                    info["cooldown_until"] = None
+            except Exception:
+                pass
+        active = herdr_counts.get(name, 0)
+        max_c = info.get("max_concurrency", 2)
+        if active >= max_c:
+            continue
+        consumed = info.get("tokens_consumed_window", 0)
+        limit = info.get("window_limit_est", 200000)
+        headroom_ratio = max(0.0, (limit - consumed) / limit)
+        pri = info.get("priority", 99)
+        score = (headroom_ratio * 100) - (active * 25) - (pri * 2)
+        candidates.append((score, name, headroom_ratio, active))
+    
+    candidates.sort(reverse=True)
+    if candidates:
+        best = candidates[0]
+        selected_agent = best[1]
+        agent_rationale = f"Headroom: {int(best[2]*100)}% free, Active Herdr sessions: {best[3]}"
+    else:
+        selected_agent = "codex"
+        agent_rationale = "Fallback (all agents at capacity/cooldown)"
+
+# Update last_used
+if selected_agent in agents_data:
+    agents_data[selected_agent]["last_used"] = now.isoformat()
+    try:
+        status_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(status_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.chmod(status_file, 0o600)
+    except Exception:
+        pass
+
+# Resolve provider model
+default_models = {
+    "codex": {"frontier": "gpt-6-luna", "balanced": "gpt-5.6-terra", "fast": "gpt-reserve"},
+    "claude": {"frontier": "opus", "balanced": "sonnet", "fast": "haiku"},
+    "agy": {"frontier": "gemini-4-argon", "balanced": "gemini-4-argon", "fast": "gemini-3.8-flash"}
+}
+resolved_model = cli_model if cli_model else (default_models.get(selected_agent) or {}).get(model_tier, "")
+
+c_sig_str = ", ".join(signals_c) if signals_c else "None"
+u_sig_str = ", ".join(signals_u) if signals_u else "Standard"
+
+# Output tab-separated results
+print(f"{selected_agent}\t{model_tier}\t{resolved_model}\t{reasoning_effort}\t{score_c}\t{c_sig_str}\t{score_u}\t{u_sig_str}\t{agent_rationale}")
+PYENGINE
+}
+
+manage_session_subcommand() {
+  local subcmd=${1:-status}
+  shift || true
+
+  local pane_override="" agent_override="" model_override="" effort_override=""
+  local daemon_flag=false stop_flag=false status_flag=false
+  local interval_sec=30 threshold_kb=1500
+
+  while (($#)); do
+    case "$1" in
+      --pane)
+        pane_override="$2"
+        shift 2
+        ;;
+      -a|--agent)
+        agent_override="$2"
+        shift 2
+        ;;
+      -m|--model)
+        model_override="$2"
+        shift 2
+        ;;
+      -e|--effort)
+        effort_override="$2"
+        shift 2
+        ;;
+      --daemon)
+        daemon_flag=true
+        shift
+        ;;
+      --stop)
+        stop_flag=true
+        shift
+        ;;
+      --status)
+        status_flag=true
+        shift
+        ;;
+      --interval)
+        interval_sec="$2"
+        shift 2
+        ;;
+      --threshold)
+        threshold_kb="$2"
+        shift 2
+        ;;
+      -h|--help)
+        cat >&2 <<'HELPSESS'
+Usage:
+  sprout session status [options]
+  sprout session recycle [options]
+  sprout session watch [options]
+
+Options:
+  --pane PANE_ID       Target specific Herdr pane ID
+  -a, --agent AGENT    Target specific agent (codex, claude, agy)
+  -m, --model MODEL    Target specific model override
+  -e, --effort EFFORT  Target reasoning effort (low, medium, high)
+  --daemon             Run watcher as a detached background daemon
+  --stop               Stop the running background watcher daemon
+  --status             Check background watcher daemon status
+  --interval SECONDS   Watcher poll interval in seconds (default: 30)
+  --threshold KB       Context size threshold in KB to trigger handoff (default: 1500)
+  -h, --help           Show this help
+HELPSESS
+        exit 0
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  local worktree_root=""
+  worktree_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ -n "$worktree_root" ]]; then
+    worktree_root=$(cd "$worktree_root" && pwd -P)
+  else
+    worktree_root=$(pwd -P)
+  fi
+
+  if ! command -v herdr >/dev/null 2>&1; then
+    printf 'Error: Herdr is required for session management.\n' >&2
+    exit 1
+  fi
+
+  python3 - "$worktree_root" "$subcmd" "$pane_override" "$agent_override" "$daemon_flag" "$stop_flag" "$status_flag" "$interval_sec" "$threshold_kb" "$config_dir" "${model_override:-}" "${effort_override:-}" <<'PYSESSION'
+import sys, json, os, subprocess, time, signal, re
+from datetime import datetime, timezone
+from pathlib import Path
+
+worktree_root = Path(sys.argv[1]).resolve()
+subcmd = sys.argv[2]
+pane_override = sys.argv[3].strip()
+agent_override = sys.argv[4].strip()
+daemon_flag = sys.argv[5].lower() == "true"
+stop_flag = sys.argv[6].lower() == "true"
+status_flag = sys.argv[7].lower() == "true"
+interval_sec = int(sys.argv[8])
+threshold_kb = int(sys.argv[9])
+config_dir = Path(sys.argv[10]).resolve()
+model_override = sys.argv[11].strip() if len(sys.argv) > 11 else ""
+effort_override = sys.argv[12].strip() if len(sys.argv) > 12 else ""
+
+pid_file = config_dir / "watch.pid"
+log_file = config_dir / "watch.log"
+
+def evaluate_smart_routing(task_type, summary, description, issue_type, priority, status_file, cli_agent="", default_agent="auto", cli_model="", cli_effort=""):
+    text = f"{task_type} {summary} {description}".lower()
+
+    high_complexity_terms = {
+        "concurrency": 4, "deadlock": 5, "race condition": 5, "memory leak": 5,
+        "mutex": 4, "transaction": 4, "cryptography": 4, "crypto": 3,
+        "jwt": 3, "distributed": 4, "migration": 3, "protocol": 3,
+        "ast": 4, "compiler": 4, "recursion": 3, "performance": 3,
+        "profiling": 3, "optimization": 3, "thread safe": 4, "lock": 3,
+        "deadlocks": 5, "bottleneck": 3, "leak": 4, "review": 2, "triage": 2
+    }
+    low_complexity_terms = {
+        "readme": -3, "docs": -3, "documentation": -4, "typo": -4,
+        "css": -3, "color": -3, "padding": -3, "margin": -3,
+        "style": -3, "lint": -4, "format": -3, "changelog": -4,
+        "bump": -4, "version": -3, "comment": -3, "guide": -2
+    }
+
+    uncertainty_terms = {
+        "investigate": 4, "debug": 4, "intermittent": 4, "flaky": 4,
+        "unknown": 3, "root cause": 4, "audit": 3, "security": 4,
+        "vulnerability": 4, "why": 3, "reproduce": 3, "edge case": 3,
+        "race condition": 3, "memory leak": 3, "deadlock": 3, "review": 2
+    }
+    mechanical_terms = {
+        "add field": -3, "rename": -3, "update text": -3, "boilerplate": -3,
+        "crud": -2, "copy": -2, "template": -2, "scaffold": -2
+    }
+
+    score_c = 0
+    signals_c = []
+    if task_type in {"feat", "fix", "refactor", "perf", "spike", "review", "recycle"}:
+        score_c += 1
+    elif task_type in {"doc", "docs", "chore", "style", "ci"}:
+        score_c -= 2
+
+    for term, weight in high_complexity_terms.items():
+        if term in text:
+            score_c += weight
+            signals_c.append(f"'{term}' (+{weight})")
+
+    for term, weight in low_complexity_terms.items():
+        if term in text:
+            score_c += weight
+            signals_c.append(f"'{term}' ({weight})")
+
+    itype = (issue_type or "").lower()
+    if "bug" in itype:
+        score_c += 2
+        signals_c.append("Bug (+2)")
+    elif "spike" in itype:
+        score_c += 3
+        signals_c.append("Spike (+3)")
+    elif "review" in itype:
+        score_c += 2
+        signals_c.append("PR Review (+2)")
+    elif "doc" in itype:
+        score_c -= 3
+        signals_c.append("Doc (-3)")
+
+    prio = (priority or "").lower()
+    if prio in {"critical", "highest"}:
+        score_c += 2
+        signals_c.append("Critical Priority (+2)")
+    elif prio == "high":
+        score_c += 1
+        signals_c.append("High Priority (+1)")
+    elif prio in {"low", "lowest"}:
+        score_c -= 1
+        signals_c.append("Low Priority (-1)")
+
+    model_tier = "frontier" if score_c >= 4 else ("balanced" if score_c >= 1 else "fast")
+
+    score_u = 0
+    signals_u = []
+    for term, weight in uncertainty_terms.items():
+        if term in text:
+            score_u += weight
+            signals_u.append(f"'{term}' (+{weight})")
+    for term, weight in mechanical_terms.items():
+        if term in text:
+            score_u += weight
+            signals_u.append(f"'{term}' ({weight})")
+
+    reasoning_effort = "high" if score_u >= 3 else ("medium" if score_u >= 0 else "low")
+    if cli_effort:
+        reasoning_effort = cli_effort
+
+    default_state = {
+        "agents": {
+            "codex": {"priority": 1, "status": "available", "cooldown_until": None, "max_concurrency": 3, "tokens_consumed_window": 0, "window_limit_est": 500000},
+            "claude": {"priority": 2, "status": "available", "cooldown_until": None, "max_concurrency": 2, "tokens_consumed_window": 0, "window_limit_est": 200000},
+            "agy": {"priority": 3, "status": "available", "cooldown_until": None, "max_concurrency": 3, "tokens_consumed_window": 0, "window_limit_est": 300000}
+        }
+    }
+    data = default_state
+    if status_file and Path(status_file).exists():
+        try:
+            with open(status_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = default_state
+
+    agents_data = data.setdefault("agents", default_state["agents"])
+    if "codex" in agents_data:
+        agents_data["codex"]["priority"] = 1
+        if agents_data["codex"].get("window_limit_est", 0) < 500000:
+            agents_data["codex"]["window_limit_est"] = 500000
+        if agents_data["codex"].get("max_concurrency", 0) < 3:
+            agents_data["codex"]["max_concurrency"] = 3
+    if "claude" in agents_data:
+        agents_data["claude"]["priority"] = 2
+    if "agy" in agents_data:
+        agents_data["agy"]["priority"] = 3
+
+    now = datetime.now().astimezone()
+
+    herdr_counts = {}
+    try:
+        out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+        h_data = json.loads(out)
+        for ag in (h_data.get("result") or {}).get("agents") or []:
+            k = ag.get("agent")
+            st = (ag.get("agent_status") or "").lower()
+            if k and st in ("working", "busy"):
+                herdr_counts[k] = herdr_counts.get(k, 0) + 1
+    except Exception:
+        pass
+
+    selected_agent = ""
+    agent_rationale = ""
+
+    if cli_agent and cli_agent != "auto":
+        selected_agent = cli_agent
+        agent_rationale = f"Explicit override via -a {cli_agent}"
+    elif default_agent and default_agent != "auto":
+        selected_agent = default_agent
+        agent_rationale = f"Project config default: {default_agent}"
+    else:
+        candidates = []
+        for name, info in agents_data.items():
+            cd = info.get("cooldown_until")
+            if cd:
+                try:
+                    cd_dt = datetime.fromisoformat(cd)
+                    if cd_dt > now:
+                        continue
+                    else:
+                        info["status"] = "available"
+                        info["cooldown_until"] = None
+                except Exception:
+                    pass
+            active = herdr_counts.get(name, 0)
+            max_c = info.get("max_concurrency", 2)
+            if active >= max_c:
+                continue
+            consumed = info.get("tokens_consumed_window", 0)
+            limit = info.get("window_limit_est", 200000)
+            headroom_ratio = max(0.0, (limit - consumed) / limit)
+            pri = info.get("priority", 99)
+            score = (headroom_ratio * 100) - (active * 25) - (pri * 2)
+            candidates.append((score, name, headroom_ratio, active))
+        
+        candidates.sort(reverse=True)
+        if candidates:
+            best = candidates[0]
+            selected_agent = best[1]
+            agent_rationale = f"Headroom: {int(best[2]*100)}% free, Active Herdr sessions: {best[3]}"
+        else:
+            selected_agent = "codex"
+            agent_rationale = "Fallback (all agents at capacity/cooldown)"
+
+    if selected_agent in agents_data and status_file:
+        agents_data[selected_agent]["last_used"] = now.isoformat()
+        try:
+            p_sf = Path(status_file)
+            p_sf.parent.mkdir(parents=True, exist_ok=True)
+            with open(p_sf, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.chmod(p_sf, 0o600)
+        except Exception:
+            pass
+
+    default_models = {
+        "codex": {"frontier": "gpt-6-luna", "balanced": "gpt-5.6-terra", "fast": "gpt-reserve"},
+        "claude": {"frontier": "opus", "balanced": "sonnet", "fast": "haiku"},
+        "agy": {"frontier": "gemini-4-argon", "balanced": "gemini-4-argon", "fast": "gemini-3.8-flash"}
+    }
+    resolved_model = cli_model if cli_model else (default_models.get(selected_agent) or {}).get(model_tier, "")
+
+    c_sig_str = ", ".join(signals_c) if signals_c else "None"
+    u_sig_str = ", ".join(signals_u) if signals_u else "Standard"
+
+    return {
+        "selected_agent": selected_agent,
+        "model_tier": model_tier,
+        "resolved_model": resolved_model,
+        "reasoning_effort": reasoning_effort,
+        "score_c": score_c,
+        "signals_c": c_sig_str,
+        "score_u": score_u,
+        "signals_u": u_sig_str,
+        "agent_rationale": agent_rationale
+    }
+
+def get_watcher_pid():
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            os.kill(pid, 0)
+            return pid
+        except Exception:
+            try:
+                pid_file.unlink()
+            except Exception:
+                pass
+    return None
+
+def find_agent_for_worktree(target_root, pane_ovr="", agent_ovr=""):
+    try:
+        out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+        agents = (json.loads(out).get("result") or {}).get("agents") or []
+        for ag in agents:
+            if pane_ovr and ag.get("pane_id") == pane_ovr:
+                return ag
+            if agent_ovr and (ag.get("name") == agent_ovr or ag.get("agent") == agent_ovr):
+                return ag
+            ag_cwd = Path(ag.get("cwd", "")).resolve()
+            fg_cwd = Path(ag.get("foreground_cwd", "")).resolve()
+            if ag_cwd == target_root or fg_cwd == target_root:
+                return ag
+    except Exception:
+        pass
+    return None
+
+def find_pane_for_worktree(target_root, pane_ovr=""):
+    try:
+        out = subprocess.check_output(["herdr", "pane", "list"], stderr=subprocess.DEVNULL)
+        panes = (json.loads(out).get("result") or {}).get("panes") or []
+        panes.sort(key=lambda x: (0 if str(x.get("pane_id", "")).endswith(":p1") else 1))
+        for p in panes:
+            if pane_ovr and p.get("pane_id") == pane_ovr:
+                return p
+            p_cwd = Path(p.get("cwd", "")).resolve()
+            fg_cwd = Path(p.get("foreground_cwd", "")).resolve()
+            if p_cwd == target_root or fg_cwd == target_root:
+                return p
+    except Exception:
+        pass
+    return None
+
+def auto_spawn_workspace(target_root):
+    try:
+        label = target_root.name
+        out = subprocess.check_output(
+            ["herdr", "workspace", "create", "--cwd", str(target_root), "--label", label, "--focus"],
+            stderr=subprocess.DEVNULL
+        )
+        data = json.loads(out)
+        return (data.get("result", {}) or {}).get("root_pane", {}).get("pane_id")
+    except Exception:
+        return None
+
+def estimate_context_metrics(ag_info):
+    if not ag_info:
+        return 0, 0, None
+    pane_id = ag_info.get("pane_id", "")
+    agent_kind = ag_info.get("agent", "")
+    sess_id = (ag_info.get("agent_session") or {}).get("value") or ""
+
+    size_bytes = 0
+    transcript_path = None
+    if agent_kind == "agy" and sess_id:
+        p = Path.home() / ".gemini" / "antigravity-cli" / "brain" / sess_id / ".system_generated" / "logs" / "transcript.jsonl"
+        if p.exists():
+            transcript_path = p
+            size_bytes = p.stat().st_size
+
+    scroll_lines = 0
+    if pane_id:
+        try:
+            out = subprocess.check_output(["herdr", "pane", "get", pane_id], stderr=subprocess.DEVNULL)
+            p_data = (json.loads(out).get("result") or {}).get("pane") or {}
+            scroll_lines = (p_data.get("scroll") or {}).get("max_offset_from_bottom", 0)
+        except Exception:
+            pass
+
+    size_kb = size_bytes / 1024.0 if size_bytes > 0 else (scroll_lines * 70.0 / 1024.0)
+    return size_kb, scroll_lines, transcript_path
+
+def is_in_pane(pane_id, p_info=None):
+    if os.environ.get("HERDR_PANE_ID") == pane_id:
+        return True
+    if not p_info:
+        try:
+            out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
+            p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
+        except Exception:
+            return False
+    shell_pid = p_info.get("shell_pid")
+    if not shell_pid:
+        return False
+    cur = os.getpid()
+    while cur > 1:
+        if cur == shell_pid:
+            return True
+        try:
+            with open(f"/proc/{cur}/stat", "r") as f:
+                cur = int(f.read().split()[3])
+        except Exception:
+            break
+    return False
+
+def terminate_agent_in_pane(pane_id, timeout=3.5):
+    # Never send interrupt signals to the pane running this script
+    if is_in_pane(pane_id):
+        return True
+
+    try:
+        subprocess.run(["herdr", "pane", "send-keys", pane_id, "esc", "C-c", "C-c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+    my_pids = {os.getpid(), os.getppid()}
+    start_t = time.time()
+    while time.time() - start_t < timeout:
+        try:
+            out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
+            p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
+            shell_pid = p_info.get("shell_pid")
+            fg_procs = p_info.get("foreground_processes") or []
+            non_shell = [p for p in fg_procs if p.get("pid") != shell_pid and p.get("pid") not in my_pids and p.get("name") not in ("bash", "zsh", "sh", "fish", "sprout", "python", "python3")]
+            if not non_shell:
+                return True
+            if time.time() - start_t >= 1.0:
+                for p in non_shell:
+                    target_pid = p.get("pid")
+                    if target_pid and target_pid not in my_pids:
+                        try:
+                            os.kill(target_pid, signal.SIGTERM)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        time.sleep(0.3)
+
+    try:
+        out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
+        p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
+        shell_pid = p_info.get("shell_pid")
+        for p in (p_info.get("foreground_processes") or []):
+            if p.get("pid") != shell_pid and p.get("pid") not in my_pids and p.get("name") not in ("bash", "zsh", "sh", "fish", "sprout", "python", "python3"):
+                try:
+                    os.kill(p["pid"], signal.SIGKILL)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    time.sleep(0.5)
+    return True
+
+sprout_dir = worktree_root / ".sprout"
+handoff_file = sprout_dir / "handoff.md"
+
+if subcmd == "status":
+    agent_info = find_agent_for_worktree(worktree_root, pane_override, agent_override)
+    w_pid = get_watcher_pid()
+
+    print(f"\n🌱 Sprout Session Lifecycle & Autonomous Watcher Status")
+    print(f"Worktree: {worktree_root}\n")
+
+    watcher_desc = f"ACTIVE (PID: {w_pid})" if w_pid else "INACTIVE (Start with: sprout session watch --daemon)"
+    print(f"Autonomous Sentinel Watcher: {watcher_desc}")
+
+    if agent_info:
+        name = agent_info.get("name") or agent_info.get("agent", "unknown")
+        kind = agent_info.get("agent", "unknown")
+        pane_id = agent_info.get("pane_id", "unknown")
+        status = agent_info.get("agent_status", "unknown").upper()
+        sess_val = (agent_info.get("agent_session") or {}).get("value") or "—"
+        size_kb, scroll_lines, _ = estimate_context_metrics(agent_info)
+
+        print(f"Herdr Agent:       {name} (kind: {kind})")
+        print(f"Herdr Pane:        {pane_id}")
+        print(f"Lifecycle Status:  {status}")
+        print(f"Session ID:        {sess_val}")
+        print(f"Context Metrics:   ~{size_kb:.1f} KB (Scrollback: {scroll_lines} lines)")
+    else:
+        pane_info = find_pane_for_worktree(worktree_root, pane_override)
+        if pane_info:
+            p_id = pane_info.get("pane_id")
+            ws_id = pane_info.get("workspace_id")
+            print(f"Herdr Pane:        {p_id} (workspace: {ws_id}, shell ready for auto-spawn)")
+        else:
+            print("Herdr Agent:       No active agent or pane currently mapped to this worktree in Herdr.")
+
+    if handoff_file.exists():
+        mtime = datetime.fromtimestamp(handoff_file.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"Last Handoff:      {mtime} ({handoff_file})")
+    else:
+        print("Last Handoff:      None (session has not been recycled yet)")
+    print("")
+
+elif subcmd == "recycle":
+    agent_info = find_agent_for_worktree(worktree_root, pane_override, agent_override)
+    pane_id = None
+    agent_kind = None
+    agent_name = None
+    is_respawn = False
+
+    if agent_info:
+        pane_id = agent_info.get("pane_id")
+        agent_kind = agent_info.get("agent")
+        agent_name = agent_info.get("name") or f"agent-{worktree_root.name.lower()}"
+    else:
+        is_respawn = True
+        print(f"ℹ️  No active running agent detected in Herdr for {worktree_root.name}.")
+        print("   Checking for existing Herdr pane or workspace...")
+        pane_info = find_pane_for_worktree(worktree_root, pane_override)
+        if pane_info:
+            pane_id = pane_info.get("pane_id")
+            ws_id = pane_info.get("workspace_id")
+            if ws_id:
+                try:
+                    subprocess.run(["herdr", "workspace", "focus", ws_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+            print(f"✓ Found existing Herdr pane {pane_id} for worktree.")
+        else:
+            print(f"✓ Creating fresh Herdr workspace for {worktree_root.name}...")
+            pane_id = auto_spawn_workspace(worktree_root)
+            if not pane_id:
+                print(f"Error: Could not locate or create a Herdr pane/workspace for {worktree_root}.\nPlease verify Herdr status.", file=sys.stderr)
+                sys.exit(1)
+            print(f"✓ Created Herdr workspace with root pane {pane_id}.")
+
+    if not agent_name:
+        clean_name = re.sub(r'[^a-z0-9_-]', '', worktree_root.name.lower())[:30]
+        agent_name = agent_override or f"agent-{clean_name}"
+
+    if is_respawn:
+        print(f"\n🚀 Initiating Auto-Spawn / Respawn for {worktree_root.name} in Pane {pane_id}...")
+    else:
+        print(f"\n🔄 Initiating Warm-Start Session Recycling for {worktree_root.name}...")
+        print(f"Target Agent: {agent_name} ({agent_kind or 'unknown'}) in Pane: {pane_id}")
+
+    # 1. Snapshot Git state
+    git_status = subprocess.getoutput(f"git -C '{worktree_root}' status --short 2>/dev/null")
+    git_diff_stat = subprocess.getoutput(f"git -C '{worktree_root}' diff --stat 2>/dev/null")
+    recent_commits = subprocess.getoutput(f"git -C '{worktree_root}' log -n 3 --oneline 2>/dev/null")
+
+    issue_context = ""
+    issue_md = sprout_dir / "issue.md"
+    if issue_md.exists():
+        try:
+            issue_context = issue_md.read_text(encoding="utf-8")
+        except Exception:
+            pass
+
+    # 2. Write .sprout/handoff.md
+    sprout_dir.mkdir(parents=True, exist_ok=True)
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    handoff_content = f"""# 🔄 Sprout Session Handoff Snapshot
+
+- **Timestamp:** {now_str}
+- **Worktree:** `{worktree_root.name}`
+- **Agent:** `{agent_name}` ({agent_kind or 'auto-spawn'})
+- **Herdr Pane:** `{pane_id}`
+
+---
+
+## 📋 Git State Summary
+
+### Changed Files:
+```text
+{git_status if git_status.strip() else "(Clean working tree)"}
+```
+
+### Diff Statistics:
+```text
+{git_diff_stat if git_diff_stat.strip() else "(No unstaged/staged diffs)"}
+```
+
+### Recent Commits:
+```text
+{recent_commits if recent_commits.strip() else "(No commits on branch)"}
+```
+
+---
+
+## 🎯 Task Context
+{issue_context if issue_context.strip() else "(No issue.md attached)"}
+
+---
+
+## 🚀 Instructions for Fresh Session
+1. Read this handoff snapshot carefully to understand progress made so far.
+2. Review modified files and current git diff.
+3. Continue the implementation without re-analyzing already completed parts.
+"""
+    with open(handoff_file, "w", encoding="utf-8") as f:
+        f.write(handoff_content)
+
+    print(f"✓ State snapshot safely persisted to {handoff_file}")
+
+    is_current_terminal = is_in_pane(pane_id)
+
+    # 3. Gracefully stop previous agent process or reset pane prompt (for remote pane)
+    if not is_current_terminal:
+        if is_respawn:
+            print("✓ Ensuring Herdr pane is ready at shell prompt...")
+        else:
+            print("✓ Terminating bloated agent session in Herdr...")
+        terminate_agent_in_pane(pane_id)
+        time.sleep(0.5)
+
+    # 4. Evaluate routing using Semantic Complexity Engine & Headroom Smart Router
+    task_summary = worktree_root.name
+    task_desc = ""
+    task_issue_type = "Task"
+    task_priority = "Medium"
+
+    issue_json_file = sprout_dir / "issue.json"
+    if issue_json_file.exists():
+        try:
+            ij = json.loads(issue_json_file.read_text(encoding="utf-8"))
+            fields = ij.get("fields") or {}
+            if fields.get("summary"):
+                task_summary = fields.get("summary")
+            elif ij.get("summary"):
+                task_summary = ij.get("summary")
+            if fields.get("description"):
+                task_desc = str(fields.get("description"))
+            elif ij.get("description"):
+                task_desc = str(ij.get("description"))
+            if (fields.get("issuetype") or {}).get("name"):
+                task_issue_type = fields["issuetype"]["name"]
+            elif ij.get("type"):
+                task_issue_type = ij.get("type")
+            if (fields.get("priority") or {}).get("name"):
+                task_priority = fields["priority"]["name"]
+            elif ij.get("priority"):
+                task_priority = ij.get("priority")
+        except Exception:
+            pass
+
+    issue_md_file = sprout_dir / "issue.md"
+    if not task_desc and issue_md_file.exists():
+        try:
+            task_desc = issue_md_file.read_text(encoding="utf-8")[:1000]
+        except Exception:
+            pass
+
+    review_md_file = sprout_dir / "review.md"
+    if review_md_file.exists():
+        try:
+            task_desc += "\n" + review_md_file.read_text(encoding="utf-8")[:1000]
+        except Exception:
+            pass
+
+    # Status file location
+    status_file = None
+    try:
+        git_common = subprocess.check_output(["git", "-C", str(worktree_root), "rev-parse", "--path-format=absolute", "--git-common-dir"], stderr=subprocess.DEVNULL).decode().strip()
+        if git_common:
+            status_file = Path(git_common) / "sprout" / "agents_status.json"
+    except Exception:
+        pass
+    if not status_file or not status_file.exists():
+        status_file = Path.home() / ".sprout" / "agents_status.json"
+
+    eval_result = evaluate_smart_routing(
+        task_type="recycle",
+        summary=task_summary,
+        description=task_desc,
+        issue_type=task_issue_type,
+        priority=task_priority,
+        status_file=status_file,
+        cli_agent=agent_override,
+        default_agent="auto",
+        cli_model=model_override,
+        cli_effort=effort_override
+    )
+
+    agent_kind = eval_result["selected_agent"]
+    model_tier = eval_result["model_tier"]
+    target_model = eval_result["resolved_model"]
+    target_effort = eval_result["reasoning_effort"]
+    score_c = eval_result["score_c"]
+    signals_c = eval_result["signals_c"]
+    score_u = eval_result["score_u"]
+    signals_u = eval_result["signals_u"]
+    agent_rationale = eval_result["agent_rationale"]
+
+    print("\n🌱 [Semantic Complexity Engine]")
+    print(f"   Complexity Score: {score_c} (Signals: {signals_c}) -> Model Tier: {model_tier.upper()}")
+    print(f"   Uncertainty Score: {score_u} (Signals: {signals_u}) -> Reasoning Effort: {target_effort.upper()}")
+
+    print("\n🌱 [Smart Agent Router]")
+    print(f"   Selected Agent:  {agent_kind} ({agent_rationale})")
+    print(f"   Resolved Model:  {target_model}")
+
+    # Persist session.json
+    try:
+        sess_meta_file = sprout_dir / "session.json"
+        sess_meta_file.write_text(json.dumps({
+            "agent": agent_kind,
+            "tier": model_tier,
+            "model": target_model,
+            "effort": target_effort,
+            "mode": "plan"
+        }, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    # 5. Spawn clean agent
+    print(f"\n✓ Starting fresh {agent_kind} session in pane {pane_id} (model: {target_model}, mode: plan)...")
+    extra_args = []
+    if agent_kind == "agy":
+        extra_args = ["--", "--new-project", "--project", worktree_root.name, "--mode", "plan"]
+        if target_model:
+            extra_args += ["--model", target_model]
+        if target_effort:
+            extra_args += ["--effort", target_effort]
+    elif agent_kind == "claude":
+        extra_args = ["--", "--permission-mode", "plan"]
+        if target_model:
+            extra_args += ["--model", target_model]
+        if target_effort:
+            extra_args += ["--effort", target_effort]
+    elif agent_kind == "codex":
+        if target_model:
+            extra_args = ["--", "-m", target_model]
+
+    handoff_prompt = "BMad/Sprout: Sessão reiniciada em modo plan com contexto limpo. Leia o snapshot de handoff em .sprout/handoff.md e elabore o plano antes de aplicar alterações."
+
+    if is_current_terminal:
+        print(f"\n🚀 Launching fresh {agent_kind} session in current terminal (mode: plan)...")
+        if is_respawn:
+            print(f"✨ Agent session auto-spawned successfully! Full context preserved in handoff.md.\n")
+        else:
+            print("✨ Session recycled successfully! Context window has been reset with full memory preserved.\n")
+        sys.stdout.flush()
+        cmd_args = [agent_kind]
+        if agent_kind == "agy":
+            cmd_args += ["--model", target_model, "--effort", target_effort, "--mode", "plan", "--new-project", "--project", worktree_root.name, "-i", handoff_prompt]
+        elif agent_kind == "claude":
+            cmd_args += ["--model", target_model, "--effort", target_effort, "--permission-mode", "plan", handoff_prompt]
+        elif agent_kind == "codex":
+            if target_model:
+                cmd_args += ["-m", target_model]
+            cmd_args += [handoff_prompt]
+        # This script runs as `python3 - <<heredoc`, so fd 0 is the script pipe,
+        # not the terminal. Agent CLIs refuse to start without a TTY on stdin.
+        for std_fd, std_mode in ((0, os.O_RDWR), (1, os.O_RDWR), (2, os.O_RDWR)):
+            if os.isatty(std_fd):
+                continue
+            try:
+                tty_fd = os.open("/dev/tty", std_mode)
+                os.dup2(tty_fd, std_fd)
+                if tty_fd > 2:
+                    os.close(tty_fd)
+            except OSError:
+                print("Error: no controlling terminal available to launch the agent. Run 'sprout session recycle' from an interactive shell.", file=sys.stderr)
+                sys.exit(1)
+        os.execvp(agent_kind, cmd_args)
+
+    launch_cmd = ["herdr", "agent", "start", agent_name, "--kind", agent_kind, "--pane", pane_id] + extra_args
+    res = subprocess.run(launch_cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        time.sleep(1.0)
+        res = subprocess.run(launch_cmd, capture_output=True, text=True)
+
+    time.sleep(1.5)
+
+    # 6. Send warm-start prompt
+    try:
+        if subprocess.run(["herdr", "agent", "prompt", pane_id, handoff_prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0:
+            subprocess.run(["herdr", "agent", "prompt", agent_name, handoff_prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print("✓ Sent warm-start handoff prompt to fresh agent session.")
+    except Exception:
+        pass
+
+    if is_respawn:
+        print(f"\n✨ Agent session auto-spawned successfully in Herdr pane {pane_id}! Full context preserved in handoff.md.\n")
+    else:
+        print("\n✨ Session recycled successfully! Context window has been reset with full memory preserved.\n")
+
+elif subcmd == "watch":
+    if stop_flag:
+        w_pid = get_watcher_pid()
+        killed = False
+        if w_pid:
+            try:
+                os.kill(w_pid, signal.SIGTERM)
+                print(f"✓ Stopped Sprout Session Watcher daemon (PID: {w_pid}).")
+                killed = True
+            except Exception as e:
+                print(f"Error stopping watcher PID {w_pid}: {e}", file=sys.stderr)
+            if pid_file.exists():
+                try: pid_file.unlink()
+                except Exception: pass
+        try:
+            subprocess.run(["pkill", "-f", "Sprout Sentinel Watcher started"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        if not killed:
+            print("No active Sprout Session Watcher daemon detected.")
+        sys.exit(0)
+
+    if status_flag:
+        w_pid = get_watcher_pid()
+        if w_pid:
+            print(f"🌱 Sprout Session Watcher is ACTIVE (PID: {w_pid})")
+            print(f"Log: {log_file}")
+        else:
+            print("🌱 Sprout Session Watcher is INACTIVE")
+        sys.exit(0)
+
+    if daemon_flag:
+        w_pid = get_watcher_pid()
+        if w_pid:
+            print(f"Sprout Session Watcher is already running (PID: {w_pid}).")
+            sys.exit(0)
+
+        config_dir.mkdir(parents=True, exist_ok=True)
+        # Fork daemon subprocess
+        daemon_cmd = [
+            sys.executable, "-c",
+            """
+import sys, os, subprocess, time, json
+from datetime import datetime
+from pathlib import Path
+
+interval = int(sys.argv[1])
+threshold_kb = float(sys.argv[2])
+config_dir = Path(sys.argv[3])
+pid_file = config_dir / "watch.pid"
+
+def log_msg(msg):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+def terminate_pane(pane_id, timeout=3.5):
+    try:
+        subprocess.run(["herdr", "pane", "send-keys", pane_id, "esc", "C-c", "C-c"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+    start_t = time.time()
+    while time.time() - start_t < timeout:
+        try:
+            out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
+            p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
+            shell_pid = p_info.get("shell_pid")
+            fg_procs = p_info.get("foreground_processes") or []
+            non_shell = [p for p in fg_procs if p.get("pid") != shell_pid and p.get("name") not in ("bash", "zsh", "sh", "fish")]
+            if not non_shell:
+                return True
+            if time.time() - start_t >= 1.0:
+                for p in non_shell:
+                    target_pid = p.get("pid")
+                    if target_pid:
+                        try:
+                            os.kill(target_pid, signal.SIGTERM)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        time.sleep(0.3)
+    try:
+        out = subprocess.check_output(["herdr", "pane", "process-info", "--pane", pane_id], stderr=subprocess.DEVNULL)
+        p_info = (json.loads(out).get("result") or {}).get("process_info") or {}
+        shell_pid = p_info.get("shell_pid")
+        for p in (p_info.get("foreground_processes") or []):
+            if p.get("pid") != shell_pid and p.get("name") not in ("bash", "zsh", "sh", "fish"):
+                try:
+                    os.kill(p["pid"], signal.SIGKILL)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    time.sleep(0.5)
+    return True
+
+with open(pid_file, "w") as f:
+    f.write(str(os.getpid()))
+
+log_msg(f"Sprout Sentinel Watcher started. Interval: {interval}s, Threshold: {threshold_kb}KB")
+
+cooldowns = {}
+
+while True:
+    try:
+        out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+        agents = (json.loads(out).get("result") or {}).get("agents") or []
+        now_ts = time.time()
+        for ag in agents:
+            pane_id = ag.get("pane_id")
+            cwd = ag.get("cwd") or ag.get("foreground_cwd")
+            agent_kind = ag.get("agent")
+            agent_name = ag.get("name") or f"agent-{Path(cwd).name if cwd else 'session'}"
+            sess_id = (ag.get("agent_session") or {}).get("value")
+
+            if not cwd or not Path(cwd).is_dir():
+                continue
+            if str(cwd).endswith("/sprout"):
+                continue
+
+            agent_status = (ag.get("agent_status") or "").lower()
+            interactive_ready = ag.get("interactive_ready", False)
+
+            # Strict guard: NEVER touch an agent that is idle, done, waiting for user input, or not actively working!
+            if agent_status != "working" or interactive_ready:
+                continue
+
+            # Anti-loop cooldown per pane (10 min minimum between auto-recycles)
+            if pane_id in cooldowns and (now_ts - cooldowns[pane_id] < 600):
+                continue
+
+            size_bytes = 0
+            if agent_kind == "agy" and sess_id:
+                p = Path.home() / ".gemini" / "antigravity-cli" / "brain" / sess_id / ".system_generated" / "logs" / "transcript.jsonl"
+                if p.exists():
+                    size_bytes = p.stat().st_size
+            
+            scroll_lines = 0
+            if pane_id:
+                try:
+                    p_out = subprocess.check_output(["herdr", "pane", "get", pane_id], stderr=subprocess.DEVNULL)
+                    p_data = (json.loads(p_out).get("result") or {}).get("pane") or {}
+                    scroll_lines = (p_data.get("scroll") or {}).get("max_offset_from_bottom", 0)
+                except Exception:
+                    pass
+
+            size_kb = (size_bytes / 1024.0) if size_bytes > 0 else (scroll_lines * 70.0 / 1024.0)
+
+            if size_kb >= threshold_kb:
+                log_msg(f"Triggering auto-recycle for {agent_name} in {cwd} (Size: {size_kb:.1f}KB, Scroll: {scroll_lines} lines)")
+                cooldowns[pane_id] = now_ts
+                
+                # Notify pane
+                try:
+                    subprocess.run(["herdr", "pane", "send-text", pane_id, f"\\n\\n[Sprout Monitor] ⚠️ Context threshold exceeded ({size_kb:.1f}KB). Recycling session...\\n\\n"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+
+                # Snapshot state
+                sprout_dir = Path(cwd) / ".sprout"
+                sprout_dir.mkdir(parents=True, exist_ok=True)
+                handoff_file = sprout_dir / "handoff.md"
+                git_status = subprocess.getoutput(f"git -C '{cwd}' status --short 2>/dev/null")
+                git_diff = subprocess.getoutput(f"git -C '{cwd}' diff --stat 2>/dev/null")
+                recent = subprocess.getoutput(f"git -C '{cwd}' log -n 3 --oneline 2>/dev/null")
+                
+                handoff_md = f"# 🔄 Autonomous Session Handoff\\n\\n- **Trigger:** Context threshold exceeded ({size_kb:.1f}KB)\\n- **Timestamp:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\\n- **Agent:** {agent_name} ({agent_kind})\\n\\n## Changed Files\\n```\\n{git_status}\\n```\\n\\n## Diff Stat\\n```\\n{git_diff}\\n```\\n"
+                with open(handoff_file, "w", encoding="utf-8") as hf:
+                    hf.write(handoff_md)
+
+                # Terminate agent reliably until only shell remains
+                terminate_pane(pane_id)
+                time.sleep(0.5)
+
+                # Respawn with preserved model/effort
+                sess_meta_file = sprout_dir / "session.json"
+                target_model = ""
+                target_effort = ""
+                if sess_meta_file.exists():
+                    try:
+                        s_meta = json.loads(sess_meta_file.read_text(encoding="utf-8"))
+                        target_model = s_meta.get("model", "")
+                        target_effort = s_meta.get("effort", "")
+                    except Exception:
+                        pass
+
+                extra = []
+                if agent_kind == "agy":
+                    extra = ["--", "--new-project", "--project", Path(cwd).name]
+                    if target_model:
+                        extra += ["--model", target_model]
+                    if target_effort:
+                        extra += ["--effort", target_effort]
+                elif agent_kind == "claude":
+                    if target_model or target_effort:
+                        extra = ["--"]
+                        if target_model:
+                            extra += ["--model", target_model]
+                        if target_effort:
+                            extra += ["--effort", target_effort]
+                elif agent_kind == "codex":
+                    if target_model:
+                        extra = ["--", "--model", target_model]
+
+                launch_cmd = ["herdr", "agent", "start", agent_name, "--kind", agent_kind, "--pane", pane_id] + extra
+                res = subprocess.run(launch_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(1.5)
+                prompt = "BMad/Sprout: Sessão reiniciada automaticamente com contexto limpo pelo monitor autônomo. Leia .sprout/handoff.md e continue o trabalho."
+                subprocess.run(["herdr", "agent", "prompt", agent_name, prompt], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                log_msg(f"Auto-recycle complete for {agent_name}.")
+
+    except Exception as e:
+        log_msg(f"Watcher loop error: {e}")
+    time.sleep(interval)
+""",
+            str(interval_sec), str(threshold_kb), str(config_dir)
+        ]
+        with open(log_file, "a", encoding="utf-8") as log_stream:
+            p = subprocess.Popen(daemon_cmd, stdout=log_stream, stderr=log_stream, start_new_session=True)
+            print(f"✓ Started Sprout Autonomous Session Watcher daemon (PID: {p.pid}).")
+            print(f"Interval: {interval_sec}s | Threshold: {threshold_kb}KB | Log: {log_file}")
+        sys.exit(0)
+
+    # Foreground live watch mode
+    print(f"\n🌱 Sprout Session Watcher (Live Foreground Mode)")
+    print(f"Polling Herdr agents every {interval_sec}s (Threshold: {threshold_kb}KB)... Press Ctrl+C to exit.\n")
+    try:
+        while True:
+            out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+            agents = (json.loads(out).get("result") or {}).get("agents") or []
+            ts = datetime.now().strftime("%H:%M:%S")
+            print(f"[{ts}] Active agents: {len(agents)}")
+            for ag in agents:
+                p_id = ag.get("pane_id")
+                a_name = ag.get("name") or ag.get("agent")
+                cwd = ag.get("cwd") or ag.get("foreground_cwd")
+                st = (ag.get("agent_status") or "unknown").upper()
+                size_kb, scroll_lines, _ = estimate_context_metrics(ag)
+                status_note = f"⚠️ EXCEEDED ({size_kb:.1f}KB)" if size_kb >= threshold_kb else f"OK ({size_kb:.1f}KB, {scroll_lines} lines)"
+                print(f"  └─ Pane {p_id} ({a_name} [{st}]) in {cwd}: {status_note}")
+            time.sleep(interval_sec)
+    except KeyboardInterrupt:
+        print("\nWatcher stopped.")
+
+else:
+    print(f"Unknown session subcommand: {subcmd}. Available: status, recycle, watch", file=sys.stderr)
+    sys.exit(1)
+PYSESSION
 }
 
 manage_agent_subcommand() {
@@ -88,9 +1428,9 @@ args = sys.argv[3:]
 
 default_state = {
     "agents": {
-        "claude": {"priority": 1, "status": "available", "cooldown_until": None, "max_concurrency": 2, "last_used": None, "reason": ""},
-        "agy": {"priority": 2, "status": "available", "cooldown_until": None, "max_concurrency": 3, "last_used": None, "reason": ""},
-        "codex": {"priority": 3, "status": "available", "cooldown_until": None, "max_concurrency": 2, "last_used": None, "reason": ""}
+        "codex": {"priority": 1, "status": "available", "cooldown_until": None, "max_concurrency": 3, "last_used": None, "tokens_consumed_window": 0, "window_limit_est": 500000, "reason": ""},
+        "claude": {"priority": 2, "status": "available", "cooldown_until": None, "max_concurrency": 2, "last_used": None, "tokens_consumed_window": 0, "window_limit_est": 200000, "reason": ""},
+        "agy": {"priority": 3, "status": "available", "cooldown_until": None, "max_concurrency": 3, "last_used": None, "tokens_consumed_window": 0, "window_limit_est": 300000, "reason": ""}
     }
 }
 
@@ -138,17 +1478,18 @@ if subcmd == "status":
     try:
         out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
         h_data = json.loads(out)
-        for ag in h_data.get("result", {}).get("agents", []):
+        for ag in (h_data.get("result") or {}).get("agents") or []:
             k = ag.get("agent")
-            if k:
+            st = (ag.get("agent_status") or "").lower()
+            if k and st in ("working", "busy"):
                 herdr_counts[k] = herdr_counts.get(k, 0) + 1
     except Exception:
         pass
 
     print("\n🌱 Sprout Smart Agent Telemetry & Status")
     print(f"Store: {status_file}\n")
-    print(f"{'AGENT':<10} {'STATUS':<12} {'ACTIVE SESSIONS':<18} {'COOLDOWN UNTIL':<25} {'PRIORITY':<8}")
-    print("-" * 75)
+    print(f"{'AGENT':<10} {'STATUS':<12} {'HEADROOM':<12} {'ACTIVE SESSIONS':<18} {'COOLDOWN UNTIL':<25} {'PRIORITY':<8}")
+    print("-" * 88)
     for name, info in sorted(agents.items(), key=lambda x: x[1].get("priority", 99)):
         cd = info.get("cooldown_until") or "—"
         if cd != "—":
@@ -159,8 +1500,11 @@ if subcmd == "status":
                 pass
         st = info.get("status", "available").upper()
         active = f"{herdr_counts.get(name, 0)} (max {info.get('max_concurrency', 2)})"
+        consumed = info.get("tokens_consumed_window", 0)
+        limit = info.get("window_limit_est", 200000)
+        headroom_pct = int(max(0.0, (limit - consumed) / limit) * 100)
         pri = str(info.get("priority", 1))
-        print(f"{name:<10} {st:<12} {active:<18} {cd:<25} {pri:<8}")
+        print(f"{name:<10} {st:<12} {f'{headroom_pct}% free':<12} {active:<18} {cd:<25} {pri:<8}")
         if info.get("reason"):
             print(f"  └─ Reason: {info.get('reason')}")
     print("")
@@ -171,7 +1515,7 @@ elif subcmd == "cooldown":
         sys.exit(1)
     agent_name = args[0].lower()
     if agent_name not in agents:
-        agents[agent_name] = {"priority": 99, "status": "available", "cooldown_until": None, "max_concurrency": 2}
+        agents[agent_name] = {"priority": 99, "status": "available", "cooldown_until": None, "max_concurrency": 2, "tokens_consumed_window": 0, "window_limit_est": 200000}
     
     duration = "2h"
     until_val = None
@@ -249,6 +1593,582 @@ else:
     print(f"Unknown agent subcommand: {subcmd}. Available: status, cooldown, reset", file=sys.stderr)
     sys.exit(1)
 PYAGENT
+}
+
+check_review_subcommand() {
+  local pr_arg=""
+  local no_prompt=false
+  local do_recycle=false
+  local repo_override=""
+  local pane_override=""
+  local agent_override=""
+  local model_override=""
+  local effort_override=""
+
+  while (($#)); do
+    case "$1" in
+      --no-prompt)
+        no_prompt=true
+        shift
+        ;;
+      --recycle)
+        do_recycle=true
+        shift
+        ;;
+      --repo)
+        (($# >= 2)) || { printf 'Missing value for --repo\n' >&2; exit 2; }
+        repo_override="$2"
+        shift 2
+        ;;
+      --pane)
+        (($# >= 2)) || { printf 'Missing value for --pane\n' >&2; exit 2; }
+        pane_override="$2"
+        shift 2
+        ;;
+      -a|--agent)
+        (($# >= 2)) || { printf 'Missing value for --agent\n' >&2; exit 2; }
+        agent_override="$2"
+        shift 2
+        ;;
+      -m|--model)
+        (($# >= 2)) || { printf 'Missing value for --model\n' >&2; exit 2; }
+        model_override="$2"
+        shift 2
+        ;;
+      -e|--effort)
+        (($# >= 2)) || { printf 'Missing value for --effort\n' >&2; exit 2; }
+        effort_override="$2"
+        shift 2
+        ;;
+      -h|--help)
+        cat >&2 <<'HELPREVIEW'
+Usage:
+  sprout check-review [PR_NUMBER_OR_URL] [options]
+  sprout review [PR_NUMBER_OR_URL] [options]
+
+Options:
+  --no-prompt          Download and snapshot PR review without submitting prompt to agent
+  --recycle            Snapshot state and recycle agent session with clean context before review triage
+  -a, --agent AGENT    Target specific agent (codex, claude, agy)
+  -m, --model MODEL    Target specific model override
+  -e, --effort EFFORT  Target reasoning effort (low, medium, high)
+  --repo REPO          Explicit GitHub repository (e.g. owner/repo)
+  --pane PANE_ID       Explicit Herdr pane ID override
+  -h, --help           Show this help
+
+Examples:
+  # Inside an active worktree with an open PR on current branch:
+  sprout check-review
+
+  # Specify PR number or GitHub PR URL:
+  sprout check-review 58
+  sprout check-review https://github.com/my-org/finance_tool/pull/58
+
+  # Recycle bloated context before review triage:
+  sprout check-review --recycle
+HELPREVIEW
+        exit 0
+        ;;
+      -*)
+        printf 'Unknown option for check-review: %s\n' "$1" >&2
+        exit 2
+        ;;
+      *)
+        if [[ -z "$pr_arg" ]]; then
+          pr_arg="$1"
+          shift
+        else
+          printf 'Unexpected argument: %s\n' "$1" >&2
+          exit 2
+        fi
+        ;;
+    esac
+  done
+
+  command -v gh >/dev/null 2>&1 || {
+    printf 'Error: GitHub CLI (gh) is required for sprout check-review.\nInstall it or visit https://cli.github.com\n' >&2
+    exit 1
+  }
+
+  local cur_dir
+  cur_dir=$(pwd -P)
+  local cur_git_root=""
+  cur_git_root=$(git -C "$cur_dir" rev-parse --show-toplevel 2>/dev/null || true)
+  local cur_branch=""
+  if [[ -n "$cur_git_root" ]]; then
+    cur_branch=$(git -C "$cur_dir" branch --show-current 2>/dev/null || true)
+  fi
+
+  printf '\n🔍 [Sprout PR Review Ingestion]\n'
+
+  local gh_view_args=()
+  if [[ -n "$repo_override" ]]; then
+    gh_view_args+=(--repo "$repo_override")
+  fi
+
+  if [[ -n "$pr_arg" ]]; then
+    gh_view_args+=("$pr_arg")
+  fi
+
+  local pr_fields="number,title,url,state,headRefName,baseRefName,body,reviews,comments,headRepositoryOwner,headRepository,reviewDecision"
+  local pr_json
+  if ! pr_json=$(gh pr view "${gh_view_args[@]}" --json "$pr_fields" 2>&1); then
+    printf 'Error retrieving PR from GitHub:\n%s\n' "$pr_json" >&2
+    exit 1
+  fi
+
+  local pr_meta
+  pr_meta=$(python3 - "$pr_json" <<'PYMETA'
+import json, sys
+raw = sys.argv[1]
+idx = raw.find("{")
+data = json.loads(raw[idx:] if idx != -1 else raw)
+num = data.get("number", "")
+title = data.get("title", "")
+head = data.get("headRefName", "")
+base = data.get("baseRefName", "")
+repo = (data.get("headRepository") or {}).get("nameWithOwner") or ""
+if not repo:
+    owner = (data.get("headRepositoryOwner") or {}).get("login") or ""
+    name = (data.get("headRepository") or {}).get("name") or ""
+    if owner and name:
+        repo = f"{owner}/{name}"
+decision = data.get("reviewDecision") or "PENDING"
+state = data.get("state") or "OPEN"
+print(f"{num}\t{title}\t{head}\t{base}\t{repo}\t{decision}\t{state}")
+PYMETA
+  )
+
+  local pr_number pr_title pr_head pr_base pr_repo pr_decision pr_state
+  pr_number=$(awk -F'\t' '{print $1}' <<< "$pr_meta")
+  pr_title=$(awk -F'\t' '{print $2}' <<< "$pr_meta")
+  pr_head=$(awk -F'\t' '{print $3}' <<< "$pr_meta")
+  pr_base=$(awk -F'\t' '{print $4}' <<< "$pr_meta")
+  pr_repo=$(awk -F'\t' '{print $5}' <<< "$pr_meta")
+  pr_decision=$(awk -F'\t' '{print $6}' <<< "$pr_meta")
+  pr_state=$(awk -F'\t' '{print $7}' <<< "$pr_meta")
+
+  printf '   PR:            #%s — %s\n' "$pr_number" "$pr_title"
+  printf '   Branch:        %s ➔ %s (%s)\n' "$pr_head" "$pr_base" "$pr_state"
+  printf '   Decision:      %s\n' "$pr_decision"
+
+  # Locate matching worktree
+  local target_worktree=""
+  if [[ -n "$cur_git_root" && "$cur_branch" == "$pr_head" ]]; then
+    target_worktree="$cur_git_root"
+  else
+    target_worktree=$(python3 - "$pr_head" "$pr_repo" "$cur_git_root" <<'PYLOCATE_WT'
+import json, subprocess, sys
+from pathlib import Path
+
+pr_head = sys.argv[1].strip()
+pr_repo = sys.argv[2].strip()
+cur_root = sys.argv[3].strip()
+slug = pr_head.split("/")[-1]
+repo_name = pr_repo.split("/")[-1] if "/" in pr_repo else pr_repo
+
+target = None
+
+# 1. Check Herdr agents cwd
+try:
+    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+    for ag in (json.loads(out).get("result") or {}).get("agents") or []:
+        cwd = Path(ag.get("cwd") or "")
+        if cwd.name == slug or cwd.name.lower() == slug.lower() or cwd.name.replace("-", "_") == slug.replace("-", "_"):
+            if cwd.is_dir():
+                target = str(cwd.resolve())
+                break
+except Exception:
+    pass
+
+# 2. Check base repository worktree list
+if not target:
+    candidates = []
+    if cur_root:
+        candidates.append(Path(cur_root))
+    if repo_name:
+        candidates.append(Path.home() / "workspace" / repo_name)
+        candidates.append(Path.cwd().parent / repo_name)
+    for b in candidates:
+        if b.is_dir():
+            wt_out = subprocess.getoutput(f"git -C '{b}' worktree list 2>/dev/null")
+            for line in wt_out.splitlines():
+                if f"[{pr_head}]" in line:
+                    p = Path(line.split()[0])
+                    if p.is_dir():
+                        target = str(p.resolve())
+                        break
+        if target:
+            break
+
+# 3. Check standard workspace sibling directory
+if not target:
+    for base in [Path.home() / "workspace", Path.cwd().parent]:
+        cand = base / slug
+        if cand.is_dir() and (cand / ".git").exists():
+            target = str(cand.resolve())
+            break
+
+if target:
+    print(target)
+PYLOCATE_WT
+    )
+  fi
+
+  if [[ -z "$target_worktree" || ! -d "$target_worktree" ]]; then
+    if [[ -n "$cur_git_root" ]]; then
+      target_worktree="$cur_git_root"
+    else
+      printf 'Error: Could not locate local worktree for branch %s.\n' "$pr_head" >&2
+      exit 1
+    fi
+  fi
+
+  printf '   Worktree:      %s\n' "$target_worktree"
+
+  # Fetch inline code review comments via gh api
+  local inline_json="[]"
+  if [[ -n "$pr_repo" ]]; then
+    inline_json=$(gh api "repos/$pr_repo/pulls/$pr_number/comments" 2>/dev/null || echo "[]")
+  fi
+
+  # Generate .sprout/review.json and .sprout/review.md
+  local sprout_dir="$target_worktree/.sprout"
+  mkdir -p "$sprout_dir"
+  ln -sfn .sprout "$target_worktree/.jdw" 2>/dev/null || true
+
+  local summary_stats
+  summary_stats=$(python3 - "$sprout_dir" "$pr_json" "$inline_json" <<'PYPARSE_REV'
+import json, sys
+from datetime import datetime
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+raw_pr = sys.argv[2]
+idx_pr = raw_pr.find("{")
+pr_data = json.loads(raw_pr[idx_pr:] if idx_pr != -1 else raw_pr)
+
+raw_inline = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3].strip() else "[]"
+idx_inline = raw_inline.find("[")
+inline_data = json.loads(raw_inline[idx_inline:] if idx_inline != -1 else raw_inline) if idx_inline != -1 else []
+
+pr_num = pr_data.get("number", "")
+title = pr_data.get("title", "")
+url = pr_data.get("url", "")
+state = pr_data.get("state", "OPEN")
+decision = pr_data.get("reviewDecision") or "PENDING"
+head = pr_data.get("headRefName", "")
+base = pr_data.get("baseRefName", "")
+now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+reviews = pr_data.get("reviews") or []
+general_comments = pr_data.get("comments") or []
+
+review_model = {
+    "pr_number": pr_num,
+    "title": title,
+    "url": url,
+    "state": state,
+    "decision": decision,
+    "head_branch": head,
+    "base_branch": base,
+    "fetched_at": now_str,
+    "reviews_count": len(reviews),
+    "inline_comments_count": len(inline_data),
+    "general_comments_count": len(general_comments),
+    "reviews": reviews,
+    "inline_comments": inline_data,
+    "general_comments": general_comments
+}
+
+with open(out_dir / "review.json", "w", encoding="utf-8") as f:
+    json.dump(review_model, f, indent=2, ensure_ascii=False)
+
+lines = []
+lines.append(f"# 🔍 Code Review: PR #{pr_num} — {title}\n")
+lines.append(f"- **Pull Request:** [{pr_num}]({url})")
+lines.append(f"- **Branch:** `{head}` ➔ `{base}`")
+lines.append(f"- **Review Decision:** **{decision}** ({state})")
+lines.append(f"- **Snapshot Timestamp:** {now_str}\n")
+lines.append("---\n")
+
+lines.append("## 📊 Summary of Feedback")
+lines.append(f"- **Formal Reviews:** {len(reviews)}")
+lines.append(f"- **Inline Code Comments:** {len(inline_data)}")
+lines.append(f"- **General Discussion Comments:** {len(general_comments)}\n")
+lines.append("---\n")
+
+if inline_data:
+    lines.append("## 📝 Inline Code Review Comments\n")
+    by_file = {}
+    for c in inline_data:
+        path = c.get("path", "General")
+        by_file.setdefault(path, []).append(c)
+
+    for path, comments in by_file.items():
+        lines.append(f"### 📄 `{path}`\n")
+        for c in comments:
+            line_no = c.get("line") or c.get("original_line") or "Diff"
+            author = (c.get("user") or {}).get("login", "reviewer")
+            body = (c.get("body") or "").strip()
+            diff_hunk = (c.get("diff_hunk") or "").strip()
+            comment_url = c.get("html_url", "")
+            
+            hdr = f"#### Line {line_no} — @{author}"
+            if comment_url:
+                hdr += f" ([link]({comment_url}))"
+            lines.append(hdr + "\n")
+            lines.append(f"> {body}\n")
+            if diff_hunk:
+                lines.append("```diff")
+                lines.append(diff_hunk)
+                lines.append("```\n")
+    lines.append("---\n")
+
+if reviews:
+    lines.append("## 💬 Top-Level Reviews & Verdicts\n")
+    for r in reviews:
+        author = (r.get("author") or {}).get("login", "reviewer")
+        r_state = r.get("state", "COMMENTED")
+        body = (r.get("body") or "").strip()
+        lines.append(f"- **@{author}** (`{r_state}`)")
+        if body:
+            lines.append(f"  > {body}\n")
+    lines.append("---\n")
+
+if general_comments:
+    lines.append("## 💬 General PR Discussion\n")
+    for g in general_comments:
+        author = (g.get("author") or {}).get("login", "commenter")
+        body = (g.get("body") or "").strip()
+        created = g.get("createdAt", "")
+        lines.append(f"- **@{author}** ({created}):")
+        if body:
+            lines.append(f"  > {body}\n")
+    lines.append("---\n")
+
+lines.append("## 🎯 Instrução")
+lines.append("Analise os apontamentos acima e proponha as correções necessárias de forma direta e objetiva.\n")
+
+with open(out_dir / "review.md", "w", encoding="utf-8") as f:
+    f.write("\n".join(lines))
+
+print(f"{len(reviews)}\t{len(inline_data)}\t{len(general_comments)}")
+PYPARSE_REV
+  )
+
+  local rev_count inline_count comm_count
+  rev_count=$(awk -F'\t' '{print $1}' <<< "$summary_stats")
+  inline_count=$(awk -F'\t' '{print $2}' <<< "$summary_stats")
+  comm_count=$(awk -F'\t' '{print $3}' <<< "$summary_stats")
+
+  printf '✓ Saved review snapshot to %s/.sprout/review.md and review.json\n' "$target_worktree"
+  printf '   (Feedback: %s top-level reviews, %s inline comments, %s general comments)\n' "$rev_count" "$inline_count" "$comm_count"
+
+  # Optional session recycling
+  if [[ "$do_recycle" == "true" ]]; then
+    printf '\nRecycling agent session for clean context window before review...\n'
+    (cd "$target_worktree" && manage_session_subcommand recycle ${pane_override:+--pane "$pane_override"} ${agent_override:+--agent "$agent_override"} ${model_override:+--model "$model_override"} ${effort_override:+--effort "$effort_override"})
+  fi
+
+  # Resolve common_dir & status_file for agent evaluation
+  local common_dir="" status_file=""
+  local resolved
+  resolved=$(resolve_repository "$target_worktree" 2>/dev/null || true)
+  if [[ -n "$resolved" ]]; then
+    common_dir=$(sed -n '2p' <<< "$resolved")
+    status_file="$common_dir/sprout/agents_status.json"
+  fi
+  [[ -n "$status_file" ]] || status_file="$HOME/.sprout/agents_status.json"
+
+  local rev_text="PR #${pr_number}: ${pr_title}. Reviews: ${rev_count}, Inline: ${inline_count}, Comments: ${comm_count}"
+  if [[ -f "$target_worktree/.sprout/review.md" ]]; then
+    rev_text+=$'\n'
+    rev_text+=$(head -n 40 "$target_worktree/.sprout/review.md")
+  fi
+
+  local routing_res
+  routing_res=$(evaluate_agent_routing "review" "$pr_title" "$rev_text" "Review" "Medium" "$status_file" "${agent_override:-}" "auto" "${model_override:-}" "${effort_override:-medium}")
+
+  local chosen_agent model_tier agent_model reasoning_effort score_c signals_c score_u signals_u agent_rationale
+  chosen_agent=$(awk -F'\t' '{print $1}' <<< "$routing_res")
+  model_tier=$(awk -F'\t' '{print $2}' <<< "$routing_res")
+  agent_model=$(awk -F'\t' '{print $3}' <<< "$routing_res")
+  reasoning_effort=$(awk -F'\t' '{print $4}' <<< "$routing_res")
+  score_c=$(awk -F'\t' '{print $5}' <<< "$routing_res")
+  signals_c=$(awk -F'\t' '{print $6}' <<< "$routing_res")
+  score_u=$(awk -F'\t' '{print $7}' <<< "$routing_res")
+  signals_u=$(awk -F'\t' '{print $8}' <<< "$routing_res")
+  agent_rationale=$(awk -F'\t' '{print $9}' <<< "$routing_res")
+
+  printf '\n🌱 [Semantic Complexity Engine]\n'
+  printf '   Complexity Score: %s (Signals: %s) -> Model Tier: %s\n' "$score_c" "$signals_c" "${model_tier^^}"
+  printf '   Uncertainty Score: %s (Signals: %s) -> Reasoning Effort: %s\n' "$score_u" "$signals_u" "${reasoning_effort^^}"
+
+  printf '\n🌱 [Smart Agent Router]\n'
+  printf '   Selected Agent:  %s (%s)\n' "$chosen_agent" "$agent_rationale"
+  printf '   Resolved Model:  %s\n' "$agent_model"
+
+  # Persist to .sprout/session.json
+  cat > "$target_worktree/.sprout/session.json" <<EOF
+{
+  "agent": "$chosen_agent",
+  "tier": "$model_tier",
+  "model": "$agent_model",
+  "effort": "$reasoning_effort",
+  "mode": "plan"
+}
+EOF
+
+  local bmad_prompt="BMad, analise os apontamentos de review do PR #$pr_number em .sprout/review.md no modo plan.
+Apresente de forma direta e objetiva o plano das correções necessárias no código e aguarde confirmação para aplicar."
+
+  if [[ "$no_prompt" == "true" ]]; then
+    printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree"
+    return 0 2>/dev/null || exit 0
+  fi
+
+  # 1. Direct interactive execution if user is running sprout review inside this worktree terminal
+  local is_current_terminal=false
+  if [[ -t 0 && -t 1 && "$cur_dir" == "$target_worktree"* ]]; then
+    is_current_terminal=true
+  fi
+
+  if [[ "$is_current_terminal" == "true" ]]; then
+    printf '\n🚀 Launching interactive %s session for BMad Review Triage (mode: plan)...\n' "$chosen_agent"
+    cd "$target_worktree"
+    if [[ "$chosen_agent" == "agy" ]]; then
+      agy --model "$agent_model" --effort "$reasoning_effort" --mode plan --new-project --project "$(basename "$target_worktree")" -i "$bmad_prompt"
+    elif [[ "$chosen_agent" == "claude" ]]; then
+      claude --model "$agent_model" --effort "$reasoning_effort" --permission-mode plan "$bmad_prompt"
+    elif [[ "$chosen_agent" == "codex" ]]; then
+      if [[ -n "$agent_model" ]]; then
+        codex -m "$agent_model" "$bmad_prompt"
+      else
+        codex "$bmad_prompt"
+      fi
+    else
+      "$chosen_agent" "$bmad_prompt"
+    fi
+    return 0 2>/dev/null || exit 0
+  fi
+
+  # 2. Remote orchestration via Herdr (when run from outside the target worktree)
+  if command -v herdr >/dev/null 2>&1 && herdr status client >/dev/null 2>&1; then
+    local agent_info
+    agent_info=$(python3 - "$target_worktree" "${pane_override:-}" <<'PYAGENT_FIND'
+import json, subprocess, sys
+from pathlib import Path
+
+target_root = Path(sys.argv[1]).resolve()
+pane_ovr = sys.argv[2].strip()
+
+# 1. Search for active agent in herdr agent list
+try:
+    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+    agents = (json.loads(out).get("result") or {}).get("agents") or []
+    for ag in agents:
+        status = ag.get("agent_status", "")
+        is_active = status in ("working", "idle", "blocked")
+        st = "active" if is_active else "inactive"
+        if pane_ovr and ag.get("pane_id") == pane_ovr:
+            print(f"{ag.get('name') or ag.get('agent')}\t{ag.get('pane_id')}\t{ag.get('workspace_id', '')}\t{st}")
+            sys.exit(0)
+        ag_cwd = Path(ag.get("cwd", "")).resolve()
+        fg_cwd = Path(ag.get("foreground_cwd", "")).resolve()
+        if ag_cwd == target_root or fg_cwd == target_root:
+            print(f"{ag.get('name') or ag.get('agent')}\t{ag.get('pane_id')}\t{ag.get('workspace_id', '')}\t{st}")
+            sys.exit(0)
+except Exception:
+    pass
+
+# 2. Search for existing pane in herdr pane list
+try:
+    p_out = subprocess.check_output(["herdr", "pane", "list"], stderr=subprocess.DEVNULL)
+    panes = (json.loads(p_out).get("result") or {}).get("panes") or []
+    panes.sort(key=lambda x: (0 if str(x.get("pane_id", "")).endswith(":p1") else 1))
+    for p in panes:
+        if pane_ovr and p.get("pane_id") == pane_ovr:
+            print(f"agent-{target_root.name.lower()}\t{p.get('pane_id')}\t{p.get('workspace_id', '')}\tpane_found")
+            sys.exit(0)
+        p_cwd = Path(p.get("cwd", "")).resolve()
+        fg_cwd = Path(p.get("foreground_cwd", "")).resolve()
+        if p_cwd == target_root or fg_cwd == target_root:
+            print(f"agent-{target_root.name.lower()}\t{p.get('pane_id')}\t{p.get('workspace_id', '')}\tpane_found")
+            sys.exit(0)
+except Exception:
+    pass
+
+# 3. Create fresh workspace
+try:
+    ws_out = subprocess.check_output(
+        ["herdr", "workspace", "create", "--cwd", str(target_root), "--label", target_root.name, "--focus"],
+        stderr=subprocess.DEVNULL
+    )
+    ws_data = (json.loads(ws_out).get("result") or {})
+    new_pane_id = (ws_data.get("root_pane") or {}).get("pane_id", "")
+    new_ws_id = (ws_data.get("workspace") or {}).get("workspace_id", "")
+    if new_pane_id:
+        print(f"agent-{target_root.name.lower()}\t{new_pane_id}\t{new_ws_id}\tworkspace_created")
+        sys.exit(0)
+except Exception:
+    pass
+
+sys.exit(1)
+PYAGENT_FIND
+    ) || true
+
+    if [[ -n "$agent_info" ]]; then
+      local ag_name ag_pane ag_ws ag_state
+      ag_name=$(awk -F'\t' '{print $1}' <<< "$agent_info")
+      ag_pane=$(awk -F'\t' '{print $2}' <<< "$agent_info")
+      ag_ws=$(awk -F'\t' '{print $3}' <<< "$agent_info")
+      ag_state=$(awk -F'\t' '{print $4}' <<< "$agent_info")
+
+      if [[ -n "$ag_ws" ]]; then
+        herdr workspace focus "$ag_ws" >/dev/null 2>&1 || true
+      fi
+
+      if [[ "$ag_state" != "active" ]]; then
+        printf '\n🚀 Auto-spawning fresh agent in Herdr pane %s...\n' "$ag_pane"
+        herdr pane send-keys "$ag_pane" esc C-c C-c >/dev/null 2>&1 || true
+        sleep 0.5
+
+        local safe_agent_name
+        safe_agent_name=$(printf 'agent-%s' "$(basename "$target_worktree")" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
+
+        local agent_extra_args=()
+        if [[ "$chosen_agent" == "agy" ]]; then
+          agent_extra_args=(-- --new-project --project "$(basename "$target_worktree")" --model "$agent_model" --effort "$reasoning_effort" --mode plan)
+        elif [[ "$chosen_agent" == "claude" ]]; then
+          agent_extra_args=(-- --model "$agent_model" --effort "$reasoning_effort" --permission-mode plan)
+        elif [[ "$chosen_agent" == "codex" ]]; then
+          if [[ -n "$agent_model" ]]; then
+            agent_extra_args=(-- -m "$agent_model")
+          fi
+        fi
+
+        printf 'Starting %s (%s, model: %s, mode: plan) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$ag_pane"
+        if herdr agent start "$safe_agent_name" --kind "$chosen_agent" --pane "$ag_pane" "${agent_extra_args[@]}" 2>/dev/null; then
+          sleep 1.0
+          ag_name="$safe_agent_name"
+        else
+          printf 'Warning: Could not start agent automatically in pane %s. Pane is focused for manual interaction.\n' "$ag_pane" >&2
+        fi
+      fi
+
+      printf '\nSubmitting BMad Review Triage prompt to Herdr pane %s...\n' "$ag_pane"
+      if herdr agent prompt "$ag_pane" "$bmad_prompt" >/dev/null 2>&1 || herdr agent prompt "$ag_name" "$bmad_prompt" >/dev/null 2>&1; then
+        printf '✓ Prompt delivered to Herdr pane %s (%s). Review dossier is ready in %s/.sprout/review.md\n' "$ag_pane" "$ag_name" "$target_worktree"
+      else
+        printf 'Note: agent prompt submission did not complete. Pane %s is focused for manual input.\n' "$ag_pane" >&2
+      fi
+    else
+      printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree"
+    fi
+  else
+    printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree"
+  fi
 }
 
 configure_jira() {
@@ -378,22 +2298,910 @@ print(f"Base repository detected as {base_repo}; its path was not saved in eithe
 PYINIT
 }
 
+# Returns 0 when <dir> holds no project yet: missing, empty, or a repository
+# without commits that contains only Sprout/bootstrap leftovers.
+is_empty_project() {
+  local dir=$1 entry
+  [[ -e "$dir" ]] || return 0
+  [[ -d "$dir" ]] || return 1
+  if [[ -d "$dir/.git" ]] && git -C "$dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+    return 1
+  fi
+  while IFS= read -r entry; do
+    case "$entry" in
+      .git|.sprout|.jdw|.gitignore|README|README.*) ;;
+      *) return 1 ;;
+    esac
+  done < <(ls -A "$dir" 2>/dev/null)
+  return 0
+}
+
+plant_repository() {
+  local source_input=""
+  local dest_input=""
+  local spec_input=""
+  local branch_override=""
+  local name_override=""
+  local agent_override="auto"
+  local method_override="bmad"
+  local no_herdr=false
+  local no_agent=false
+
+  while (($#)); do
+    case "$1" in
+      -s|--spec)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        spec_input=$2; shift 2 ;;
+      -b|--branch)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        branch_override=$2; shift 2 ;;
+      --dest)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        dest_input=$2; shift 2 ;;
+      --name)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        name_override=$2; shift 2 ;;
+      -a|--agent)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        agent_override=$2; shift 2 ;;
+      -m|--method)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        method_override=$2; shift 2 ;;
+      --no-herdr)
+        no_herdr=true; shift ;;
+      --no-agent)
+        no_agent=true; shift ;;
+      -h|--help)
+        cat <<'PLANTHelp'
+Usage:
+  sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
+  sprout plant [SPEC_DOC] [DEST_DIR] [options]
+  sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
+  sprout plant [DEST_DIR] [options]            (empty/new directory: greenfield)
+
+Plant a base repository tree from a Git URL, local path, or a product specification
+document (.md, .markdown, .html) deterministically with zero LLMs.
+In an empty or new directory (or a repo without commits), plant runs in greenfield
+mode automatically; without a spec the agent starts product discovery
+(bmad-brainstorming / bmad-product-brief). Use --no-agent to only initialize the repo.
+
+Options:
+  -s, --spec PATH       Path to a product vision, PRD, or spec document (.md, .html)
+  -b, --branch BRANCH   Branch to checkout after cloning (e.g. main, develop, feat/xyz)
+  --dest PATH           Destination directory (defaults to repo name or derived project slug)
+  --name NAME           Project display name (defaults to repository name or document title)
+  -a, --agent NAME      Default agent (auto, claude, agy, codex). Default: auto
+  -m, --method NAME     Default methodology (bmad, scpe, none). Default: bmad
+  --no-agent            Do not launch agent session in Herdr
+  --no-herdr            Do not create or focus workspace in Herdr
+  -h, --help            Show this help
+
+Examples:
+  # Plant a brand new project from a Markdown specification:
+  sprout plant vision.md
+  sprout plant specs/prd.html ~/workspace/meu_app
+
+  # Plant an empty project (no spec):
+  sprout plant meu_app
+  sprout plant meu_app --no-agent
+
+  # Plant from a remote repository:
+  sprout plant git@github.com:m4rc0s/sprout.git
+  sprout plant https://github.com/m4rc0s/sprout.git --branch develop
+
+  # Plant an existing repository and seed it with a spec document:
+  sprout plant git@github.com:org/repo.git --spec vision.md
+  sprout plant --spec vision.md (inside an existing repo)
+PLANTHelp
+        exit 0
+        ;;
+      -*)
+        printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
+      *)
+        if [[ -z "$spec_input" && ( "$1" =~ \.(md|markdown|html|htm)$ || ( -f "$1" && ! -d "$1" ) ) ]]; then
+          spec_input=$1
+        elif [[ -z "$source_input" && -z "$spec_input" ]]; then
+          source_input=$1
+        elif [[ -z "$dest_input" ]]; then
+          dest_input=$1
+        else
+          printf 'Unexpected positional argument: %s\n' "$1" >&2; exit 2
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  local spec_file=""
+  local spec_title=""
+  local spec_slug=""
+  local spec_ext=""
+
+  if [[ -n "$spec_input" ]]; then
+    if [[ ! -f "$spec_input" ]]; then
+      printf 'Error: Specification document not found: %s\n' "$spec_input" >&2
+      exit 1
+    fi
+    spec_file=$(cd "$(dirname "$spec_input")" && pwd -P)/$(basename "$spec_input")
+
+    # Extract spec title, slug, and format deterministically
+    local spec_info
+    spec_info=$(python3 - "$spec_file" <<'PYSPEC'
+import sys, re, unicodedata
+from html.parser import HTMLParser
+from pathlib import Path
+
+p = Path(sys.argv[1])
+raw = p.read_text(encoding="utf-8", errors="replace")
+ext = p.suffix.lower()
+
+title = ""
+plain_text = ""
+
+if ext in (".html", ".htm"):
+    class Extractor(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.text_parts = []
+            self.title_parts = []
+            self.h1_parts = []
+            self.in_title = False
+            self.in_h1 = False
+        def handle_starttag(self, tag, attrs):
+            if tag == "title": self.in_title = True
+            elif tag == "h1" and not self.h1_parts: self.in_h1 = True
+        def handle_endtag(self, tag):
+            if tag == "title": self.in_title = False
+            elif tag == "h1": self.in_h1 = False
+        def handle_data(self, data):
+            if self.in_title: self.title_parts.append(data)
+            if self.in_h1: self.h1_parts.append(data)
+            self.text_parts.append(data)
+    
+    parser = Extractor()
+    parser.feed(raw)
+    title = "".join(parser.h1_parts).strip() or "".join(parser.title_parts).strip()
+    plain_text = " ".join("".join(parser.text_parts).split())
+else:
+    for line in raw.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("# ") and not title:
+            title = line_s.lstrip("# ").strip()
+            break
+        elif re.match(r"^title\s*[:=]\s*['\"]?(.*?)['\"]?$", line_s, re.I) and not title:
+            title = re.match(r"^title\s*[:=]\s*['\"]?(.*?)['\"]?$", line_s, re.I).group(1).strip()
+            break
+    plain_text = raw
+    if not title:
+        for line in raw.splitlines():
+            if line.strip():
+                title = line.strip()[:60]
+                break
+
+title = title or p.stem.replace("_", " ").title()
+
+norm = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+norm = re.sub(r"[^\w\s-]", "", norm).strip().lower()
+words = [re.sub(r"[-\s]+", "", w) for w in norm.split() if w]
+stop_words = {"de", "do", "da", "dos", "das", "no", "na", "nos", "nas", "em", "para", "com", "por", "the", "a", "an", "of", "in", "on", "for", "with", "to", "and", "e"}
+res = []
+cur_len = 0
+for w in words:
+    add_len = len(w) + (1 if res else 0)
+    if cur_len + add_len > 32 and res:
+        break
+    res.append(w)
+    cur_len += add_len
+while len(res) > 1 and res[-1] in stop_words:
+    res.pop()
+slug = "_".join(res) or p.stem.lower()
+
+print(f"{title}\t{slug}\t{ext}")
+PYSPEC
+    )
+    spec_title=$(awk -F'\t' '{print $1}' <<< "$spec_info")
+    spec_slug=$(awk -F'\t' '{print $2}' <<< "$spec_info")
+    spec_ext=$(awk -F'\t' '{print $3}' <<< "$spec_info")
+  fi
+
+  # Without a spec, a lone positional that is not a remote URL nor an existing
+  # project is the destination of a brand new (greenfield) project.
+  if [[ -n "$source_input" && -z "$spec_file" && -z "$dest_input" ]]; then
+    local src_path=${source_input%%#*}
+    local url_re='://|^[^/@]+@[^/:]+:|\.git/?$'
+    if [[ ! "$src_path" =~ $url_re ]] && is_empty_project "$src_path"; then
+      dest_input=$src_path
+      source_input=""
+    fi
+  fi
+
+  # Check if we are inside an existing Git repo or need a Greenfield project
+  local current_repo
+  current_repo=$(git rev-parse --show-toplevel 2>/dev/null || true)
+
+  local is_greenfield=false
+  local repo_url=""
+  local repo_name=""
+  local branch_from_url=""
+  local gh_repo=""
+
+  if [[ -n "$source_input" ]]; then
+    local parsed_info
+    parsed_info=$(python3 - "$source_input" <<'PYPARSE'
+import sys, re
+
+raw = sys.argv[1].strip()
+branch = ""
+if "#" in raw:
+    raw, branch = raw.split("#", 1)
+
+clean = re.sub(r"\.git/?$", "", raw.rstrip("/"))
+name = re.split(r"[/:]", clean)[-1]
+name = re.sub(r"[^\w.-]", "_", name)
+
+github_repo = ""
+m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", raw)
+if m:
+    github_repo = m.group(1)
+
+print(f"{raw}\t{name}\t{branch}\t{github_repo}")
+PYPARSE
+    )
+    repo_url=$(awk -F'\t' '{print $1}' <<< "$parsed_info")
+    repo_name=$(awk -F'\t' '{print $2}' <<< "$parsed_info")
+    branch_from_url=$(awk -F'\t' '{print $3}' <<< "$parsed_info")
+    gh_repo=$(awk -F'\t' '{print $4}' <<< "$parsed_info")
+  elif [[ -n "$spec_file" ]]; then
+    if [[ -n "$current_repo" && -z "$dest_input" ]] && ! is_empty_project "$current_repo"; then
+      repo_url="$current_repo"
+      repo_name="$(basename "$current_repo")"
+    elif [[ -n "$current_repo" && -z "$dest_input" ]]; then
+      is_greenfield=true
+      dest_input="$current_repo"
+      repo_name="$(basename "$current_repo")"
+    else
+      is_greenfield=true
+      repo_name="$spec_slug"
+    fi
+  elif [[ -n "$current_repo" ]] && ! is_empty_project "$current_repo"; then
+    repo_url="$current_repo"
+    repo_name="$(basename "$current_repo")"
+  elif [[ -n "$dest_input" || -n "$current_repo" ]] || is_empty_project "$(pwd -P)"; then
+    is_greenfield=true
+    if [[ -z "$dest_input" ]]; then
+      dest_input="${current_repo:-$(pwd -P)}"
+    fi
+    if [[ "$dest_input" == "." ]]; then
+      repo_name="$(basename "$(pwd -P)")"
+    else
+      repo_name="$(basename "$dest_input")"
+    fi
+    printf 'Note: empty project detected - planting as greenfield.\n'
+  else
+    printf 'Error: Provide a repository URL, Git path, or specification document (.md, .html).\nRun sprout plant --help for usage.\n' >&2
+    exit 1
+  fi
+
+  local project_name="${name_override:-${spec_title:-$repo_name}}"
+  local target_branch="${branch_override:-$branch_from_url}"
+
+  local target_dir
+  if [[ -n "$dest_input" ]]; then
+    if [[ "$dest_input" == "." ]]; then
+      target_dir="$(pwd -P)"
+    elif [[ "$dest_input" = /* ]]; then
+      target_dir="$dest_input"
+    else
+      target_dir="$(pwd -P)/$dest_input"
+    fi
+  else
+    target_dir="$(pwd -P)/$repo_name"
+  fi
+
+  printf '\n🌱 [Sprout Plant] Planting project tree...\n'
+  if [[ -n "$spec_file" ]]; then
+    printf '   Specification: %s\n' "$spec_file"
+  fi
+  if [[ -n "$repo_url" ]]; then
+    printf '   Source Repo:   %s\n' "$repo_url"
+  fi
+  printf '   Destination:   %s\n' "$target_dir"
+  [[ -z "$target_branch" ]] || printf '   Target Branch: %s\n' "$target_branch"
+
+  # 1. Establish Git repository
+  if [[ "$is_greenfield" == "true" ]]; then
+    if [[ -d "$target_dir/.git" ]]; then
+      printf '   Note: Directory %s is already a Git repository.\n' "$target_dir"
+    elif [[ -d "$target_dir" ]] && ! is_empty_project "$target_dir"; then
+      printf 'Error: Destination directory %s exists and is not empty.\n' "$target_dir" >&2
+      exit 1
+    else
+      mkdir -p "$target_dir"
+      git -C "$target_dir" init -b "${target_branch:-main}" >/dev/null 2>&1
+      printf '   Git Init:      Initialized clean repository on branch %s\n' "${target_branch:-main}"
+    fi
+  else
+    if [[ -d "$target_dir/.git" ]]; then
+      printf '   Note: Directory %s is already a Git repository.\n' "$target_dir"
+    elif [[ -d "$target_dir" && $(ls -A "$target_dir" 2>/dev/null) ]]; then
+      printf 'Error: Destination directory %s exists and is not empty.\n' "$target_dir" >&2
+      exit 1
+    else
+      mkdir -p "$(dirname "$target_dir")"
+      if ! git clone "$repo_url" "$target_dir"; then
+        printf 'Error: Failed to clone repository from %s\n' "$repo_url" >&2
+        exit 1
+      fi
+    fi
+  fi
+
+  # 2. Checkout target branch if specified
+  local active_branch
+  if [[ -n "$target_branch" && "$is_greenfield" != "true" ]]; then
+    if git -C "$target_dir" rev-parse --verify "refs/heads/$target_branch" >/dev/null 2>&1; then
+      git -C "$target_dir" checkout "$target_branch" >/dev/null 2>&1 || true
+    elif git -C "$target_dir" rev-parse --verify "refs/remotes/origin/$target_branch" >/dev/null 2>&1; then
+      git -C "$target_dir" checkout --track "origin/$target_branch" >/dev/null 2>&1 || git -C "$target_dir" checkout -b "$target_branch" "origin/$target_branch" >/dev/null 2>&1 || true
+    else
+      git -C "$target_dir" checkout -b "$target_branch" >/dev/null 2>&1 || true
+    fi
+  fi
+  active_branch=$(git -C "$target_dir" branch --show-current 2>/dev/null || echo "main")
+  active_branch=$(tail -n 1 <<< "$active_branch")
+  [[ -n "$active_branch" ]] || active_branch="main"
+
+  # 3. Resolve metadata
+  local resolved canonical_root common_dir
+  resolved=$(resolve_repository "$target_dir") || {
+    printf 'Error: Could not resolve git repository metadata at %s\n' "$target_dir" >&2
+    exit 1
+  }
+  canonical_root=$(sed -n '1p' <<< "$resolved")
+  common_dir=$(sed -n '2p' <<< "$resolved")
+
+  # 4. Ingest specification document if provided
+  mkdir -p "$target_dir/.sprout"
+  ln -sfn .sprout "$target_dir/.jdw" 2>/dev/null || true
+
+  if [[ -n "$spec_file" ]]; then
+    cp "$spec_file" "$target_dir/.sprout/spec${spec_ext}"
+    printf '   Spec Ingest:   Saved to .sprout/spec%s\n' "$spec_ext"
+
+    if [[ ! -f "$target_dir/README.md" ]]; then
+      cat > "$target_dir/README.md" <<EOF
+# ${project_name}
+
+Project planted by Sprout from \`${spec_file##*/}\`.
+
+## Vision & Overview
+See \`.sprout/spec${spec_ext}\` for detailed requirements and specifications.
+EOF
+      printf '   Created:       README.md\n'
+    fi
+
+    if [[ ! -f "$target_dir/product_vision.md" ]]; then
+      if [[ "$spec_ext" =~ \.(md|markdown)$ ]]; then
+        cp "$spec_file" "$target_dir/product_vision.md"
+        printf '   Created:       product_vision.md (SCPE/BMad standard)\n'
+      fi
+    fi
+
+    python3 - "$target_dir/.sprout" "$project_name" "$spec_file" "$spec_ext" <<'PYNORM_SPEC'
+import json, sys, os
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+project_name = sys.argv[2]
+spec_path = Path(sys.argv[3])
+spec_ext = sys.argv[4]
+
+user_name = os.getenv("USER") or "developer"
+raw_content = spec_path.read_text(encoding="utf-8", errors="replace")
+
+issue_model = {
+    "key": "INIT",
+    "summary": f"Bootstrap: {project_name}",
+    "status": "In Progress",
+    "type": "Initiative",
+    "priority": "High",
+    "assignee": user_name,
+    "description": f"Initial product specification ingested from {spec_path.name}.\n\n{raw_content[:4000]}",
+    "source": "spec",
+    "spec_file": spec_path.name,
+    "url": ""
+}
+
+with open(out_dir / "issue.json", "w", encoding="utf-8") as f:
+    json.dump(issue_model, f, indent=2, ensure_ascii=False)
+
+with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
+    f.write(f"# [INIT] {project_name}\n\n")
+    f.write(f"- **Tipo:** Initiative / Bootstrap\n")
+    f.write(f"- **Prioridade:** High\n")
+    f.write(f"- **Origem:** Specification Document (`{spec_path.name}`)\n")
+    f.write(f"- **Responsável:** {user_name}\n\n")
+    f.write(f"## Especificação e Definições Básicas\n\n")
+    f.write(raw_content)
+    f.write("\n")
+PYNORM_SPEC
+    printf '   Context:       Saved to .sprout/issue.json and .sprout/issue.md\n'
+  elif [[ "$is_greenfield" == "true" ]]; then
+    if [[ ! -f "$target_dir/README.md" ]]; then
+      printf '# %s\n' "$project_name" > "$target_dir/README.md"
+      printf '   Created:       README.md\n'
+    fi
+    if [[ ! -f "$target_dir/.gitignore" ]]; then
+      printf '.sprout/\n.jdw\n' > "$target_dir/.gitignore"
+      printf '   Created:       .gitignore\n'
+    fi
+  fi
+
+  # 5. Initialize Sprout configuration (100% deterministic, zero LLMs)
+  local sprout_dir="$common_dir/sprout"
+  mkdir -p "$sprout_dir"
+  local config_file="$sprout_dir/config.toml"
+
+  if [[ ! -f "$config_file" ]]; then
+    cat > "$config_file" <<EOF
+[project]
+name = "${project_name}"
+github_repo = "${gh_repo}"
+
+[defaults]
+agent = "${agent_override}"
+method = "${method_override}"
+
+[models.tier_map]
+feat = "frontier"
+fix = "frontier"
+refactor = "frontier"
+perf = "frontier"
+spike = "frontier"
+test = "balanced"
+build = "balanced"
+docs = "fast"
+chore = "fast"
+style = "fast"
+ci = "fast"
+revert = "fast"
+EOF
+    printf '   Config:        Created %s\n' "$config_file"
+  else
+    printf '   Config:        Existing %s found\n' "$config_file"
+  fi
+
+  # 6. Initialize agents_status.json
+  local status_file="$sprout_dir/agents_status.json"
+  if [[ ! -f "$status_file" ]]; then
+    local global_status="$HOME/.sprout/agents_status.json"
+    if [[ -f "$global_status" ]]; then
+      cp "$global_status" "$status_file"
+    else
+      cat > "$status_file" <<'EOF'
+{
+  "claude": {"tokens_consumed_5h": 0, "active_sessions": 0, "cooldown_until": 0, "reason": ""},
+  "agy": {"tokens_consumed_5h": 0, "active_sessions": 0, "cooldown_until": 0, "reason": ""},
+  "codex": {"tokens_consumed_5h": 0, "active_sessions": 0, "cooldown_until": 0, "reason": ""}
+}
+EOF
+    fi
+  fi
+
+  # 7. Initial commit if brand new repo
+  if [[ "$is_greenfield" == "true" ]]; then
+    git -C "$target_dir" add . >/dev/null 2>&1
+    local init_msg="chore: plant initial project structure"
+    [[ -z "$spec_file" ]] || init_msg="$init_msg from spec"
+    git -C "$target_dir" commit --allow-empty -m "$init_msg" >/dev/null 2>&1 || true
+    printf '   Initial Commit:Created initial commit on %s\n' "$active_branch"
+  fi
+
+  # 8. Herdr integration
+  if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1; then
+    if herdr status client >/dev/null 2>&1; then
+      printf '   Herdr:         Creating workspace %s...\n' "$project_name"
+      local ws_create_json pane_id safe_agent_name
+      ws_create_json=$(herdr workspace create --cwd "$target_dir" --label "$project_name" --focus 2>/dev/null) || true
+      pane_id=$(jq -r '.result.root_pane.pane_id // empty' <<< "$ws_create_json" 2>/dev/null || true)
+
+      if [[ "$no_agent" != "true" && -n "$pane_id" ]]; then
+        safe_agent_name=$(printf 'agent-%s' "$project_name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
+        
+        local routing_res
+        routing_res=$(evaluate_agent_routing "feat" "$project_name" "${spec_file:-}" "Feature" "High" "$status_file" "${agent_override:-auto}" "auto" "" "")
+        local chosen_agent model_tier agent_model reasoning_effort
+        chosen_agent=$(awk -F'\t' '{print $1}' <<< "$routing_res")
+        model_tier=$(awk -F'\t' '{print $2}' <<< "$routing_res")
+        agent_model=$(awk -F'\t' '{print $3}' <<< "$routing_res")
+        reasoning_effort=$(awk -F'\t' '{print $4}' <<< "$routing_res")
+
+        printf '   Herdr Agent:   Starting %s (%s, model: %s, mode: plan) in pane %s...\n' "$safe_agent_name" "$chosen_agent" "$agent_model" "$pane_id"
+        cat > "$target_dir/.sprout/session.json" <<EOF
+{
+  "agent": "$chosen_agent",
+  "tier": "$model_tier",
+  "model": "$agent_model",
+  "effort": "$reasoning_effort",
+  "mode": "plan"
+}
+EOF
+        local agent_extra_args=()
+        if [[ "$chosen_agent" == "agy" ]]; then
+          agent_extra_args=(-- --new-project --project "$project_name" --model "$agent_model" --effort high --mode plan)
+        elif [[ "$chosen_agent" == "claude" ]]; then
+          agent_extra_args=(-- --model "$agent_model" --effort high --permission-mode plan)
+        elif [[ "$chosen_agent" == "codex" ]]; then
+          if [[ -n "$agent_model" ]]; then
+            agent_extra_args=(-- -m "$agent_model")
+          fi
+        fi
+
+        if herdr agent start "$safe_agent_name" --kind "$chosen_agent" --pane "$pane_id" "${agent_extra_args[@]}" 2>/dev/null; then
+          local initial_prompt=""
+          if [[ -n "$spec_file" ]]; then
+            initial_prompt="BMad, inicie no modo plan. O projeto $project_name foi plantado a partir do documento de especificação salvo em .sprout/spec$spec_ext. A visão geral está em .sprout/issue.md. Elabore o plano de arquitetura e primeira iniciativa antes de codificar."
+          elif [[ "$is_greenfield" == "true" ]]; then
+            initial_prompt="BMad, inicie no modo plan. O projeto $project_name é um repositório vazio recém-plantado, sem especificação. Use bmad-brainstorming ou bmad-product-brief para conduzir a descoberta e comece pedindo que eu descreva o produto (problema, público e objetivo). Não codifique antes de ter a visão do produto."
+          else
+            initial_prompt="BMad, inicie no modo plan. Repositório base $project_name plantado e pronto. Elabore o plano de arquitetura para a primeira feature/iniciativa antes de codificar."
+          fi
+          herdr agent prompt "$safe_agent_name" "$initial_prompt" >/dev/null 2>&1 || true
+        fi
+      fi
+    fi
+  fi
+
+  printf '\n✨ Tree planted successfully! (A árvore base foi plantada e enraizada)\n'
+  printf '   Location:      %s\n' "$target_dir"
+  printf '   Active Branch: %s\n' "$active_branch"
+  printf '   Default Agent: %s\n' "$agent_override"
+  printf '   Default Method:%s\n' "$method_override"
+  if [[ -n "$spec_file" ]]; then
+    printf '   Spec Context:  .sprout/spec%s (and .sprout/issue.md)\n' "$spec_ext"
+  fi
+  if [[ "$is_greenfield" == "true" && -z "$spec_file" ]]; then
+    printf '   Greenfield:    Empty project initialized (use --no-agent to skip the discovery agent)\n'
+  fi
+  printf '\nPara começar a brotar novas tarefas (sprout worktrees):\n'
+  printf '   cd %q\n' "$target_dir"
+  printf '   sprout feat "Sua primeira feature"\n'
+  printf '   sprout fix "Seu primeiro bug fix"\n'
+  printf '   sprout session status\n\n'
+}
+
+sync_with_main_subcommand() {
+  local target_root=""
+  target_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+  if [[ -z "$target_root" ]]; then
+    printf 'Error: sprout sync must be run inside a Git repository or worktree.\n' >&2
+    exit 1
+  fi
+
+  local cur_branch
+  cur_branch=$(git -C "$target_root" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  if [[ -z "$cur_branch" || "$cur_branch" == "HEAD" ]]; then
+    printf 'Error: Unable to determine active branch.\n' >&2
+    exit 1
+  fi
+
+  base_branch="main"
+  if git -C "$target_root" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$target_root" show-ref --verify --quiet refs/remotes/origin/main; then
+    base_branch="master"
+  fi
+
+  printf '\n🔄 [Sprout Sync] Synchronizing %s with origin/%s...\n' "$cur_branch" "$base_branch"
+  printf 'Fetching latest %s from origin...\n' "$base_branch"
+  if ! git -C "$target_root" fetch origin "$base_branch"; then
+    printf 'Warning: Could not fetch from origin. Checking local origin/%s reference...\n' "$base_branch" >&2
+  fi
+
+  if [[ "$cur_branch" == "$base_branch" ]]; then
+    printf 'Current branch is %s. Fast-forwarding...\n' "$base_branch"
+    git -C "$target_root" merge --ff-only "origin/$base_branch"
+    printf '✓ Branch %s is up-to-date with origin/%s.\n' "$base_branch" "$base_branch"
+    return 0
+  fi
+
+  local did_stash=false
+  if ! git -C "$target_root" diff --quiet || ! git -C "$target_root" diff --cached --quiet; then
+    printf '⚠️  Working tree has uncommitted changes. Stashing before rebase...\n'
+    git -C "$target_root" stash push -m "sprout-sync-autostash" >/dev/null 2>&1
+    did_stash=true
+  fi
+
+  printf 'Rebasing %s on top of origin/%s...\n' "$cur_branch" "$base_branch"
+  if git -C "$target_root" rebase "origin/$base_branch"; then
+    printf '✓ Successfully rebased %s onto origin/%s.\n' "$cur_branch" "$base_branch"
+    git -C "$target_root" config branch."$cur_branch".remote origin
+    git -C "$target_root" config branch."$cur_branch".merge "refs/heads/$base_branch"
+    git -C "$target_root" config branch."$cur_branch".rebase true
+  else
+    printf '⚠️  Rebase encountered conflicts. Please resolve conflicts or run: git rebase --abort\n' >&2
+    if [[ "$did_stash" == "true" ]]; then
+      printf 'Note: uncommitted changes were stashed (git stash pop).\n' >&2
+    fi
+    return 1
+  fi
+
+  if [[ "$did_stash" == "true" ]]; then
+    printf 'Restoring stashed changes...\n'
+    git -C "$target_root" stash pop >/dev/null 2>&1 || true
+  fi
+  printf '✨ Branch %s is now current with origin/%s.\n\n' "$cur_branch" "$base_branch"
+}
+
+prune_worktree_subcommand() {
+  local target_input="" do_yes=false do_force=false keep_branch=false keep_remote=false no_herdr=false
+
+  while (($#)); do
+    case "$1" in
+      -y|--yes) do_yes=true; shift ;;
+      --force) do_force=true; shift ;;
+      --keep-branch) keep_branch=true; shift ;;
+      --keep-remote) keep_remote=true; shift ;;
+      --no-herdr) no_herdr=true; shift ;;
+      --help|-h) usage 0 ;;
+      -*) printf 'Unknown argument: %s\n' "$1" >&2; usage ;;
+      *)
+        [[ -z "$target_input" ]] || { printf 'Unexpected argument: %s\n' "$1" >&2; usage; }
+        target_input=$1
+        shift
+        ;;
+    esac
+  done
+
+  local cur_root
+  cur_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+
+  local target_dir=""
+  if [[ -n "$target_input" ]]; then
+    if [[ -d "$target_input" ]]; then
+      target_dir=$(cd "$target_input" && git rev-parse --show-toplevel 2>/dev/null || true)
+    fi
+    if [[ -z "$target_dir" ]]; then
+      local search_root="${cur_root:-${BASE_REPO:-}}"
+      if [[ -n "$search_root" ]]; then
+        target_dir=$(python3 - "$search_root" "$target_input" <<'PYFIND_WT'
+import subprocess, sys
+from pathlib import Path
+
+search_root = sys.argv[1]
+needle = sys.argv[2]
+needle_norm = needle.replace("-", "_").lower()
+
+proc = subprocess.run(
+    ["git", "-C", search_root, "worktree", "list", "--porcelain"],
+    capture_output=True, text=True
+)
+
+entries = []
+cur = {}
+for line in proc.stdout.splitlines():
+    if line.startswith("worktree "):
+        if cur:
+            entries.append(cur)
+        cur = {"path": line.split(" ", 1)[1]}
+    elif line.startswith("branch "):
+        cur["branch"] = line.split(" ", 1)[1].replace("refs/heads/", "")
+if cur:
+    entries.append(cur)
+
+for e in entries:
+    path = Path(e.get("path", ""))
+    branch = e.get("branch", "")
+    name_norm = path.name.replace("-", "_").lower()
+    branch_norm = branch.replace("-", "_").lower()
+    slug_norm = branch.split("/")[-1].replace("-", "_").lower() if branch else ""
+    if needle == branch or needle == str(path) or needle_norm in (name_norm, branch_norm, slug_norm):
+        print(str(path))
+        break
+PYFIND_WT
+        )
+      fi
+    fi
+    if [[ -z "$target_dir" || ! -d "$target_dir" ]]; then
+      printf 'Error: could not find a worktree matching: %s\n' "$target_input" >&2
+      exit 1
+    fi
+  else
+    target_dir="$cur_root"
+  fi
+
+  if [[ -z "$target_dir" ]]; then
+    printf 'Error: sprout prune must be run inside a worktree, or given a TARGET.\n' >&2
+    exit 1
+  fi
+  target_dir=$(cd "$target_dir" && pwd -P)
+
+  local resolved repo
+  resolved=$(resolve_repository "$target_dir") || {
+    printf 'Error: could not resolve Git repository metadata for: %s\n' "$target_dir" >&2
+    exit 1
+  }
+  repo=$(sed -n '1p' <<< "$resolved")
+
+  if [[ "$target_dir" == "$repo" ]]; then
+    printf 'Error: refusing to prune the base repository checkout: %s\n' "$repo" >&2
+    exit 1
+  fi
+
+  if ! git -C "$repo" worktree list --porcelain | grep -Fq "worktree $target_dir"; then
+    printf 'Error: %s is not a worktree of %s.\n' "$target_dir" "$repo" >&2
+    exit 1
+  fi
+
+  local branch
+  branch=$(git -C "$target_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  [[ -n "$branch" && "$branch" != "HEAD" ]] || branch=""
+
+  local dirty=false
+  if [[ -n "$(git -C "$target_dir" status --porcelain 2>/dev/null)" ]]; then
+    dirty=true
+  fi
+
+  local unpushed=0
+  if [[ -n "$branch" ]]; then
+    if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      unpushed=$(git -C "$repo" rev-list --count "origin/$branch..$branch" 2>/dev/null || echo 0)
+    else
+      unpushed=$(git -C "$repo" rev-list --count "$branch" 2>/dev/null || echo 0)
+    fi
+  fi
+
+  if [[ "$do_force" != "true" ]]; then
+    if [[ "$dirty" == "true" ]]; then
+      printf 'Error: %s has uncommitted changes. Commit/stash them or re-run with --force.\n' "$target_dir" >&2
+      exit 1
+    fi
+    if [[ "${unpushed:-0}" -gt 0 ]]; then
+      printf 'Error: branch %s has %s commit(s) not on origin. Push them or re-run with --force to discard.\n' "$branch" "$unpushed" >&2
+      exit 1
+    fi
+  fi
+
+  local remote_exists=false
+  if [[ -n "$branch" ]] && git -C "$repo" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+    remote_exists=true
+  fi
+
+  # Locate the Herdr workspace backing this worktree by matching pane/agent cwd,
+  # the same approach used by check-review's auto-spawn lookup.
+  local ws_id=""
+  if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1 && herdr status client >/dev/null 2>&1; then
+    ws_id=$(python3 - "$target_dir" <<'PYFIND_WS'
+import json, subprocess, sys
+from pathlib import Path
+
+target_root = Path(sys.argv[1]).resolve()
+
+try:
+    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
+    for ag in (json.loads(out).get("result") or {}).get("agents") or []:
+        for key in ("cwd", "foreground_cwd"):
+            p = ag.get(key, "")
+            if p and Path(p).resolve() == target_root:
+                print(ag.get("workspace_id", ""))
+                sys.exit(0)
+except Exception:
+    pass
+
+try:
+    out = subprocess.check_output(["herdr", "pane", "list"], stderr=subprocess.DEVNULL)
+    for p in (json.loads(out).get("result") or {}).get("panes") or []:
+        for key in ("cwd", "foreground_cwd"):
+            v = p.get(key, "")
+            if v and Path(v).resolve() == target_root:
+                print(p.get("workspace_id", ""))
+                sys.exit(0)
+except Exception:
+    pass
+PYFIND_WS
+    ) || true
+  fi
+
+  printf '\n🪓 [Sprout Prune]\n'
+  printf '   Worktree: %s\n' "$target_dir"
+  [[ -z "$branch" ]] || printf '   Branch:   %s\n' "$branch"
+  [[ -z "$ws_id" ]] || printf '   Herdr:    workspace %s will be closed\n' "$ws_id"
+  printf '   Actions:\n'
+  printf '     - remove worktree\n'
+  if [[ "$keep_branch" != "true" && -n "$branch" ]]; then
+    printf '     - delete local branch %s\n' "$branch"
+  fi
+  if [[ "$keep_remote" != "true" && "$remote_exists" == "true" ]]; then
+    printf '     - delete origin/%s\n' "$branch"
+  fi
+
+  if [[ "$do_yes" != "true" ]]; then
+    if [[ -t 0 ]]; then
+      local reply
+      read -r -p $'\nProceed? [y/N] ' reply
+      [[ "$reply" =~ ^[Yy]$ ]] || { printf 'Aborted.\n' >&2; exit 1; }
+    else
+      printf 'Error: refusing to prune without confirmation in a non-interactive shell. Re-run with --yes.\n' >&2
+      exit 1
+    fi
+  fi
+
+  if [[ -n "$ws_id" ]]; then
+    printf '\nClosing Herdr workspace %s...\n' "$ws_id"
+    herdr workspace close "$ws_id" >/dev/null 2>&1 || printf 'Warning: could not close Herdr workspace %s.\n' "$ws_id" >&2
+  fi
+
+  if [[ -n "$cur_root" && "$cur_root" == "$target_dir" ]]; then
+    printf '\nNote: your shell is inside the worktree being removed — after this finishes, run: cd %q\n' "$repo"
+  fi
+
+  printf '\nRemoving worktree %s...\n' "$target_dir"
+  if [[ "$do_force" == "true" ]]; then
+    git -C "$repo" worktree remove --force "$target_dir"
+  else
+    git -C "$repo" worktree remove "$target_dir"
+  fi
+  git -C "$repo" worktree prune >/dev/null 2>&1 || true
+
+  if [[ "$keep_branch" != "true" && -n "$branch" ]]; then
+    printf 'Deleting local branch %s...\n' "$branch"
+    git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || printf 'Warning: could not delete local branch %s.\n' "$branch" >&2
+  fi
+
+  if [[ "$keep_remote" != "true" && "$remote_exists" == "true" ]]; then
+    printf 'Deleting origin/%s...\n' "$branch"
+    git -C "$repo" push origin --delete "$branch" >/dev/null 2>&1 || printf 'Warning: could not delete origin/%s.\n' "$branch" >&2
+  fi
+
+  printf '\n✓ Pruned %s.\n\n' "$target_dir"
+}
+
+if [[ "${1:-}" == "plant" ]]; then
+  shift
+  plant_repository "$@"
+  exit 0
+fi
+
+if [[ "${1:-}" == "sync" || "${1:-}" == "rebase" ]]; then
+  shift
+  sync_with_main_subcommand "$@"
+  exit 0
+fi
+
+if [[ "${1:-}" == "prune" ]]; then
+  shift
+  prune_worktree_subcommand "$@"
+  exit 0
+fi
+
+if [[ "${1:-}" == "session" ]]; then
+  shift
+  manage_session_subcommand "$@"
+  exit 0
+fi
+
 if [[ "${1:-}" == "agent" ]]; then
   shift
   manage_agent_subcommand "$@"
   exit 0
 fi
+
+if [[ "${1:-}" == "check-review" || "${1:-}" == "review" ]]; then
+  shift
+  check_review_subcommand "$@"
+  exit 0
+fi
+
 if [[ "${1:-}" == "init" ]]; then
   [[ $# -eq 1 ]] || usage
   init_project
   exit 0
 fi
+
 if [[ "${1:-}" == "--configure-jira" ]]; then
   [[ $# -eq 1 ]] || usage
   configure_jira
   exit 0
 fi
-[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage
+
+[[ "${1:-}" == "--help" || "${1:-}" == "-h" ]] && usage 0
 [[ $# -ge 1 ]] || usage
 
 type=$1
@@ -406,16 +3214,19 @@ esac
 issue=
 feature=
 slug=
+text_context=
 base_override=
 dest_override=
 agent_opt=
+model_opt=
+effort_opt=
 method_opt=
 no_agent=false
 no_herdr=false
 
 while (($#)); do
   case "$1" in
-    --issue|--feature|--slug|--base|--dest|-a|--agent|-m|--method)
+    --issue|--feature|--slug|--base|--dest|-a|--agent|--model|--effort|-m|--method|-c|--context|--context-file)
       (($# >= 2)) || usage
       option=$1
       value=$2
@@ -424,9 +3235,28 @@ while (($#)); do
         --issue) [[ -z "$issue" ]] || usage; issue=$value ;;
         --feature) [[ -z "$feature" ]] || usage; feature=$value ;;
         --slug) [[ -z "$slug" ]] || usage; slug=$value ;;
+        -c|--context)
+          [[ -z "$text_context" ]] || usage
+          if [[ "$value" == "-" ]]; then
+            text_context=$(cat)
+          else
+            text_context=$value
+          fi
+          ;;
+        --context-file)
+          [[ -z "$text_context" ]] || usage
+          if [[ -f "$value" ]]; then
+            text_context=$(<"$value")
+          else
+            printf 'Context file not found: %s\n' "$value" >&2
+            exit 1
+          fi
+          ;;
         --base) [[ -z "$base_override" ]] || usage; base_override=$value ;;
         --dest) [[ -z "$dest_override" ]] || usage; dest_override=$value ;;
         -a|--agent) [[ -z "$agent_opt" ]] || usage; agent_opt=$value ;;
+        --model) [[ -z "$model_opt" ]] || usage; model_opt=$value ;;
+        --effort) [[ -z "$effort_opt" ]] || usage; effort_opt=$value ;;
         -m|--method) [[ -z "$method_opt" ]] || usage; method_opt=$value ;;
       esac
       ;;
@@ -439,7 +3269,16 @@ while (($#)); do
       shift
       ;;
     --help|-h) usage ;;
-    *) printf 'Unknown argument: %s\n' "$1" >&2; usage ;;
+    -*)
+      printf 'Unknown argument: %s\n' "$1" >&2; usage ;;
+    *)
+      if [[ -z "$text_context" && -z "$issue" ]]; then
+        text_context=$1
+        shift
+      else
+        printf 'Unexpected argument: %s\n' "$1" >&2; usage
+      fi
+      ;;
   esac
 done
 
@@ -486,110 +3325,83 @@ PYPROJECT
   if [[ ${#project_values[@]} -ge 4 ]]; then default_method=$(printf '%s' "${project_values[3]}" | base64 --decode); fi
 fi
 
-agent=${agent_opt:-${default_agent:-auto}}
-method=${method_opt:-${default_method:-bmad}}
+summary=
+issue_json=
+jira_host=
+response_file=
+issue_type=""
+priority=""
+desc_plain=""
 
-# Execute Smart Agent Router if agent is set to 'auto'
-if [[ "$agent" == "auto" ]]; then
-  status_file="$common_dir/sprout/agents_status.json"
-  router_output=$(python3 - "$status_file" <<'PYROUTE'
-import sys, json, os, subprocess
-from datetime import datetime, timezone
-from pathlib import Path
+# 1. Process free-form text context if provided
+if [[ -n "$text_context" ]]; then
+  summary=$(head -n 1 <<< "$text_context" | cut -c1-120)
+  desc_plain="$text_context"
 
-status_file = Path(sys.argv[1])
-default_state = {
-    "agents": {
-        "claude": {"priority": 1, "status": "available", "cooldown_until": None, "max_concurrency": 2},
-        "agy": {"priority": 2, "status": "available", "cooldown_until": None, "max_concurrency": 3},
-        "codex": {"priority": 3, "status": "available", "cooldown_until": None, "max_concurrency": 2}
-    }
-}
-data = default_state
-if status_file.exists():
-    try:
-        with open(status_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        data = default_state
+  if [[ -z "$feature" ]]; then
+    feature=$(python3 - "$summary" <<'PYSLUG'
+import sys, unicodedata, re
 
-agents = data.setdefault("agents", default_state["agents"])
-now = datetime.now().astimezone()
+text = sys.argv[1].strip()
+norm = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+norm = re.sub(r"[^\w\s-]", "", norm).strip().lower()
+words = [re.sub(r"[-\s]+", "", w) for w in norm.split() if w]
+stop_words = {"de", "do", "da", "dos", "das", "no", "na", "nos", "nas", "em", "para", "com", "por", "the", "a", "an", "of", "in", "on", "for", "with", "to", "and", "e"}
+res = []
+cur_len = 0
+for w in words:
+    add_len = len(w) + (1 if res else 0)
+    if cur_len + add_len > 32 and res:
+        break
+    res.append(w)
+    cur_len += add_len
+while len(res) > 1 and res[-1] in stop_words:
+    res.pop()
+slug = "_".join(res) or "task"
+print(slug)
+PYSLUG
+    )
+  fi
 
-herdr_counts = {}
-try:
-    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
-    h_data = json.loads(out)
-    for ag in h_data.get("result", {}).get("agents", []):
-        k = ag.get("agent")
-        if k:
-            herdr_counts[k] = herdr_counts.get(k, 0) + 1
-except Exception:
-    pass
+  case "$type" in
+    fix) issue_type="Bug" ;;
+    feat) issue_type="Feature" ;;
+    refactor) issue_type="Refactoring" ;;
+    perf) issue_type="Performance" ;;
+    test) issue_type="Test" ;;
+    docs|doc) issue_type="Documentation" ;;
+    style) issue_type="Style" ;;
+    chore|ci|build) issue_type="Chore" ;;
+    revert) issue_type="Revert" ;;
+    *) issue_type="Task" ;;
+  esac
 
-available_candidates = []
-cooldown_notes = []
-
-for name, info in agents.items():
-    cd = info.get("cooldown_until")
-    is_cd = False
-    if cd:
-        try:
-            cd_dt = datetime.fromisoformat(cd)
-            if cd_dt > now:
-                is_cd = True
-                cooldown_notes.append(f"{name} in cooldown until {cd_dt.strftime('%H:%M')}")
-            else:
-                info["status"] = "available"
-                info["cooldown_until"] = None
-        except Exception:
-            pass
-    active = herdr_counts.get(name, 0)
-    priority = info.get("priority", 99)
-    if not is_cd:
-        available_candidates.append((active, priority, name))
-
-selected_agent = None
-rationale = ""
-
-if available_candidates:
-    available_candidates.sort() # lowest active sessions first, then highest priority
-    selected_agent = available_candidates[0][2]
-    active_cnt = available_candidates[0][0]
-    cd_text = f"; {', '.join(cooldown_notes)}" if cooldown_notes else ""
-    rationale = f"lowest active load: {active_cnt} sessions{cd_text}"
+  priority=$(python3 - "$text_context" <<'PYPRIO'
+import sys, re
+text = sys.argv[1].lower()
+if re.search(r'\b(critical|urgent|urgente|emergenc|bloqueante|p0|grave|down|quebr|panic)\b', text):
+    print("Critical")
+elif re.search(r'\b(high|alta|importante|p1|prioridade|security|vulnerab)\b', text):
+    print("High")
+elif re.search(r'\b(low|baixa|trivial|minor|cosmetic|p3|typo)\b', text):
+    print("Low")
 else:
-    sorted_all = sorted(agents.items(), key=lambda x: x[1].get("priority", 99))
-    selected_agent = sorted_all[0][0]
-    rationale = "Warning: All agents in cooldown, selecting fallback by priority"
-
-if selected_agent in agents:
-    agents[selected_agent]["last_used"] = now.isoformat()
-    try:
-        status_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(status_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.chmod(status_file, 0o600)
-    except Exception:
-        pass
-
-print(f"{selected_agent}\t{rationale}")
-PYROUTE
+    print("Medium")
+PYPRIO
   )
-  agent=$(awk -F'\t' '{print $1}' <<< "$router_output")
-  router_rationale=$(awk -F'\t' '{print $2}' <<< "$router_output")
-  printf '\n🌱 [Smart Router] Selected agent: %s (%s)\n' "$agent" "$router_rationale"
 fi
 
-JIRA_BASE_URL=${JIRA_BASE_URL:-}
-JIRA_EMAIL=${JIRA_EMAIL:-}
-JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
-if [[ -f "$auth_file" ]]; then
-  command -v python3 >/dev/null || { printf 'python3 is required to read auth configuration.\n' >&2; exit 1; }
-  for key in base_url email api_token; do
-    var=JIRA_${key^^}
-    if [[ -z "${!var}" ]]; then
-      encoded_value=$(python3 - "$auth_file" "$key" <<'PYAUTH'
+# 2. Fetch Jira details if --issue was provided so the Semantic Complexity Engine can read it
+if [[ -n "$issue" ]]; then
+  JIRA_BASE_URL=${JIRA_BASE_URL:-}
+  JIRA_EMAIL=${JIRA_EMAIL:-}
+  JIRA_API_TOKEN=${JIRA_API_TOKEN:-}
+  if [[ -f "$auth_file" ]]; then
+    command -v python3 >/dev/null || { printf 'python3 is required to read auth configuration.\n' >&2; exit 1; }
+    for key in base_url email api_token; do
+      var=JIRA_${key^^}
+      if [[ -z "${!var}" ]]; then
+        encoded_value=$(python3 - "$auth_file" "$key" <<'PYAUTH'
 import base64
 import sys
 import tomllib
@@ -598,18 +3410,12 @@ with open(sys.argv[1], "rb") as stream:
     key = sys.argv[2]
     print(base64.b64encode(str(jira.get(key, "")).encode()).decode())
 PYAUTH
-      )
-      declare "$var=$(printf '%s' "$encoded_value" | base64 --decode)"
-    fi
-  done
-fi
+        )
+        declare "$var=$(printf '%s' "$encoded_value" | base64 --decode)"
+      fi
+    done
+  fi
 
-summary=
-issue_json=
-jira_host=
-response_file=
-
-if [[ -n "$issue" ]]; then
   command -v jq >/dev/null || { printf 'jq is required when using --issue.\n' >&2; exit 1; }
   command -v curl >/dev/null || { printf 'curl is required when using --issue.\n' >&2; exit 1; }
   [[ -n "$JIRA_BASE_URL" ]] || { printf 'JIRA_BASE_URL is not set and auth.toml missing: %s\n' "$auth_file" >&2; exit 1; }
@@ -643,13 +3449,6 @@ if [[ -n "$issue" ]]; then
   fi
   if [[ "$http_status" != "200" ]]; then
     printf 'Jira returned HTTP %s for issue %s.\n' "$http_status" "$issue" >&2
-    if [[ "$http_status" == "401" ]]; then
-      printf 'Check the Atlassian account email, token validity, and that the token has an issue-read scope.\n' >&2
-    elif [[ "$http_status" == "403" ]]; then
-      printf 'The token is recognized but lacks an issue-read scope or your account lacks Browse Projects permission.\n' >&2
-    elif [[ "$http_status" == "404" ]]; then
-      printf 'Check that the issue key exists, the token includes read:jira-work (or its granular read scope), and your account can browse the issue.\n' >&2
-    fi
     exit 1
   fi
   issue_json=$(<"$response_file")
@@ -657,16 +3456,82 @@ if [[ -n "$issue" ]]; then
     printf 'Jira issue %s did not return a summary.\n' "$issue" >&2
     exit 1
   }
+  issue_type=$(jq -r '.fields.issuetype.name // ""' <<<"$issue_json")
+  priority=$(jq -r '.fields.priority.name // ""' <<<"$issue_json")
+  
+  jira_desc=$(python3 - "$response_file" <<'PYDESC'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        data = json.load(f)
+    raw = (data.get("fields") or {}).get("description")
+    def extract_text(node):
+        if isinstance(node, dict):
+            t = node.get("text", "") if node.get("type") == "text" else ""
+            return t + "".join(extract_text(v) for v in node.values())
+        elif isinstance(node, list):
+            return "".join(extract_text(i) for i in node)
+        return str(node) if isinstance(node, str) else ""
+    print(extract_text(raw).strip() if raw else "")
+except Exception:
+    print("")
+PYDESC
+  )
+  if [[ -n "$text_context" ]]; then
+    desc_plain="${jira_desc}
+
+${text_context}"
+  else
+    desc_plain="$jira_desc"
+  fi
+
   feature=${feature:-$issue}
   feature=$(printf '%s' "$feature" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
   slug=${slug:-$issue}
   slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
 fi
 
-[[ -n "$feature" ]] || { printf 'Provide --issue or --feature.\n' >&2; usage; }
+# 3. Fallbacks when neither issue nor text context is provided
+if [[ -z "$summary" ]]; then
+  summary=${feature:-}
+  desc_plain=${feature:-}
+  issue_type="Task"
+  priority="Medium"
+fi
+
+feature=${feature:-$issue}
+feature=$(printf '%s' "$feature" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
 slug=${slug:-$feature}
-[[ "$feature" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { printf 'Invalid feature name: %s\n' "$feature" >&2; exit 2; }
-[[ "$slug" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { printf 'Invalid branch slug: %s\n' "$slug" >&2; exit 2; }
+slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+summary=${summary:-$feature}
+
+[[ -n "$feature" ]] || { printf 'Provide a task context, --issue, or --feature.\n' >&2; usage; }
+slug=${slug:-$feature}
+summary=${summary:-$feature}
+
+# 1. Run the Weighted Semantic Complexity Engine & Headroom-First Smart Router
+status_file="$common_dir/sprout/agents_status.json"
+routing_resolution=$(evaluate_agent_routing "$type" "$summary" "${desc_plain:-}" "${issue_type:-}" "${priority:-}" "$status_file" "${agent_opt:-}" "${default_agent:-auto}" "${model_opt:-}" "${effort_opt:-}" "$project_config")
+
+agent=$(awk -F'\t' '{print $1}' <<< "$routing_resolution")
+model_tier=$(awk -F'\t' '{print $2}' <<< "$routing_resolution")
+model_name=$(awk -F'\t' '{print $3}' <<< "$routing_resolution")
+reasoning_effort=$(awk -F'\t' '{print $4}' <<< "$routing_resolution")
+score_c=$(awk -F'\t' '{print $5}' <<< "$routing_resolution")
+signals_c=$(awk -F'\t' '{print $6}' <<< "$routing_resolution")
+score_u=$(awk -F'\t' '{print $7}' <<< "$routing_resolution")
+signals_u=$(awk -F'\t' '{print $8}' <<< "$routing_resolution")
+agent_rationale=$(awk -F'\t' '{print $9}' <<< "$routing_resolution")
+
+printf '\n🌱 [Semantic Complexity Engine]\n'
+printf '   Complexity Score: %s (Signals: %s) -> Model Tier: %s\n' "$score_c" "$signals_c" "${model_tier^^}"
+printf '   Uncertainty Score: %s (Signals: %s) -> Reasoning Effort: %s\n' "$score_u" "$signals_u" "${reasoning_effort^^}"
+
+printf '\n🌱 [Smart Agent Router]\n'
+printf '   Selected Agent:  %s (%s)\n' "$agent" "$agent_rationale"
+printf '   Resolved Model:  %s\n' "$model_name"
+
+method=${method_opt:-${default_method:-bmad}}
 
 if [[ -n "$dest_override" ]]; then
   dest_parent=$(dirname "$dest_override")
@@ -690,73 +3555,121 @@ if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
   printf 'Branch already exists: %s\n' "$branch" >&2
   exit 1
 fi
-if ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main; then
-  printf 'Missing origin/main in base repository. Fetch it before creating a worktree.\n' >&2
-  exit 1
-fi
+  base_branch="main"
+  if git -C "$repo" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main; then
+    base_branch="master"
+  fi
 
-git -C "$repo" worktree add --track -b "$branch" "$target" origin/main
-printf '\nCreated worktree: %s\nBranch: %s (tracking origin/main)\nBase: %s\n' "$target" "$branch" "$repo"
+  printf '\nFetching latest %s from origin to ensure branch reference is up-to-date...\n' "$base_branch"
+  git -C "$repo" fetch origin "$base_branch" >/dev/null 2>&1 || true
+
+  if ! git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+    printf 'Missing origin/%s in base repository. Fetch it before creating a worktree.\n' "$base_branch" >&2
+    exit 1
+  fi
+
+  git -C "$repo" worktree add --track -b "$branch" "$target" "origin/$base_branch"
+  printf '\nCreated worktree: %s\nBranch: %s (tracking origin/%s)\nBase: %s\n' "$target" "$branch" "$base_branch" "$repo"
+
+  # Configure branch to track origin/main with automatic rebase on pull
+  git -C "$target" config branch."$branch".remote origin
+  git -C "$target" config branch."$branch".merge "refs/heads/$base_branch"
+  git -C "$target" config branch."$branch".rebase true
+  git -C "$target" config pull.rebase true
+
+  # `git worktree add` only checks out tracked files, so BMad's gitignored
+  # per-user config (e.g. the active initiative pointer in
+  # _bmad/custom/*.user.toml) is otherwise left behind in the base repo.
+  # Symlinked, not copied, so every worktree always reads the same live
+  # config as the base repo.
+  if [[ -d "$repo/_bmad/custom" ]]; then
+    while IFS= read -r -d '' bmad_user_file; do
+      bmad_rel=${bmad_user_file#"$repo"/}
+      mkdir -p "$target/$(dirname "$bmad_rel")"
+      ln -sfn "$bmad_user_file" "$target/$bmad_rel"
+    done < <(find "$repo/_bmad/custom" -name '*.user.toml' -print0 2>/dev/null)
+  fi
 [[ -z "$project_name" ]] || printf 'Project: %s\n' "$project_name"
 [[ -z "$github_repo" ]] || printf 'GitHub: %s\n' "$github_repo"
-[[ -z "$issue" ]] || printf 'Issue: %s — %s\n' "$issue" "$summary"
+if [[ -n "$issue" ]]; then
+  printf 'Issue: %s — %s\n' "$issue" "$summary"
+else
+  printf 'Task: %s\n' "$summary"
+fi
+
+mkdir -p "$target/.sprout"
+ln -sfn .sprout "$target/.jdw" 2>/dev/null || true
+cat > "$target/.sprout/session.json" <<EOF
+{
+  "agent": "$agent",
+  "tier": "$model_tier",
+  "model": "$model_name",
+  "effort": "$reasoning_effort",
+  "mode": "plan"
+}
+EOF
 
 # Generate normalized issue model (.sprout/issue.json and .sprout/issue.md)
 if [[ -n "$issue" && -n "$response_file" && -f "$response_file" ]]; then
-  mkdir -p "$target/.sprout"
-  ln -sfn .sprout "$target/.jdw" 2>/dev/null || true
-
-  python3 - "$response_file" "$target/.sprout" "$issue" "$jira_host" <<'PYNORM'
+  python3 - "$response_file" "$target/.sprout" "$issue" "$jira_host" "${text_context:-}" <<'PYNORM'
 import json
 import sys
 from pathlib import Path
 
-raw_file = Path(sys.argv[1])
+resp_path = Path(sys.argv[1])
 out_dir = Path(sys.argv[2])
 issue_key = sys.argv[3]
 jira_host = sys.argv[4]
+extra_context = sys.argv[5].strip() if len(sys.argv) > 5 else ""
 
-try:
-    with open(raw_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
-except Exception:
-    data = {}
+with open(resp_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
 
-fields = data.get("fields", {})
-summary = fields.get("summary", "")
-issue_type = (fields.get("issuetype") or {}).get("name", "")
-status = (fields.get("status") or {}).get("name", "")
-priority = (fields.get("priority") or {}).get("name", "")
-assignee = (fields.get("assignee") or {}).get("displayName", "")
-desc_raw = fields.get("description")
+fields = data.get("fields") or {}
+summary = fields.get("summary") or ""
+status = (fields.get("status") or {}).get("name") or "Unknown"
+issue_type = (fields.get("issuetype") or {}).get("name") or "Task"
+priority = (fields.get("priority") or {}).get("name") or "Medium"
+assignee_obj = fields.get("assignee") or {}
+assignee = assignee_obj.get("displayName") or assignee_obj.get("name") or "Unassigned"
+
+raw_desc = fields.get("description")
+desc_text = ""
 
 def extract_adf_text(node):
+    text = ""
     if isinstance(node, dict):
         if node.get("type") == "text":
-            return node.get("text", "")
-        parts = [extract_adf_text(child) for child in node.get("content", [])]
-        sep = "\n" if node.get("type") in ("paragraph", "bulletList", "orderedList", "listItem") else ""
-        return sep.join(filter(None, parts))
+            text += node.get("text", "")
+        for val in node.values():
+            text += extract_adf_text(val)
     elif isinstance(node, list):
-        return "\n".join(filter(None, [extract_adf_text(item) for item in node]))
-    return ""
+        for item in node:
+            text += extract_adf_text(item)
+    return text
 
-desc_text = extract_adf_text(desc_raw) if isinstance(desc_raw, dict) else (str(desc_raw) if desc_raw else "")
+if isinstance(raw_desc, dict) and raw_desc.get("type") == "doc":
+    desc_text = extract_adf_text(raw_desc)
+elif isinstance(raw_desc, str):
+    desc_text = raw_desc
 
-normalized = {
+if extra_context:
+    desc_text = f"{desc_text.strip()}\n\n## Developer Context / Notes\n{extra_context}"
+
+issue_model = {
     "key": issue_key,
     "summary": summary,
-    "issue_type": issue_type,
     "status": status,
+    "type": issue_type,
     "priority": priority,
     "assignee": assignee,
-    "url": f"https://{jira_host}/browse/{issue_key}",
     "description": desc_text.strip(),
-    "raw_fields": fields
+    "source": "jira",
+    "url": f"https://{jira_host}/browse/{issue_key}"
 }
 
 with open(out_dir / "issue.json", "w", encoding="utf-8") as f:
-    json.dump(normalized, f, indent=2, ensure_ascii=False)
+    json.dump(issue_model, f, indent=2, ensure_ascii=False)
 
 with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
     f.write(f"# [{issue_key}] {summary}\n\n")
@@ -768,6 +3681,45 @@ with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
     f.write(f"## Descrição\n\n{desc_text.strip()}\n")
 PYNORM
   printf 'Saved issue context to %s/.sprout/issue.json and issue.md\n' "$target"
+elif [[ -n "$summary" ]]; then
+  python3 - "$target/.sprout" "$branch" "$summary" "${desc_plain:-$summary}" "${issue_type:-Task}" "${priority:-Medium}" <<'PYNORM_MANUAL'
+import json, sys, os
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+branch = sys.argv[2]
+summary = sys.argv[3]
+desc_text = sys.argv[4]
+issue_type = sys.argv[5]
+priority = sys.argv[6]
+
+user_name = os.getenv("USER") or "developer"
+
+issue_model = {
+    "key": branch,
+    "summary": summary,
+    "status": "In Progress",
+    "type": issue_type,
+    "priority": priority,
+    "assignee": user_name,
+    "description": desc_text.strip(),
+    "source": "manual",
+    "url": ""
+}
+
+with open(out_dir / "issue.json", "w", encoding="utf-8") as f:
+    json.dump(issue_model, f, indent=2, ensure_ascii=False)
+
+with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
+    f.write(f"# [{issue_type}] {summary}\n\n")
+    f.write(f"- **Tipo:** {issue_type}\n")
+    f.write(f"- **Prioridade:** {priority}\n")
+    f.write(f"- **Origem:** Manual / Free-form Context\n")
+    f.write(f"- **Branch:** `{branch}`\n")
+    f.write(f"- **Responsável:** {user_name}\n\n")
+    f.write(f"## Descrição / Objetivo\n\n{desc_text.strip()}\n")
+PYNORM_MANUAL
+  printf 'Saved task context to %s/.sprout/issue.json and issue.md\n' "$target"
 fi
 
 # Integrate with Herdr if available and enabled
@@ -780,25 +3732,56 @@ if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1; then
     
     if [[ "$no_agent" != "true" && -n "$pane_id" ]]; then
       safe_agent_name=$(printf 'agent-%s' "$workspace_label" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
-      printf 'Starting agent %s (kind: %s) in Herdr pane %s...\n' "$safe_agent_name" "$agent" "$pane_id"
+      printf 'Starting agent %s (kind: %s, model: %s, effort: %s, mode: plan) in Herdr pane %s...\n' "$safe_agent_name" "$agent" "$model_name" "$reasoning_effort" "$pane_id"
+      cat > "$target/.sprout/session.json" <<EOF
+{
+  "agent": "$agent",
+  "tier": "$model_tier",
+  "model": "$model_name",
+  "effort": "$reasoning_effort",
+  "mode": "plan"
+}
+EOF
       agent_extra_args=()
       if [[ "$agent" == "agy" ]]; then
-        agent_extra_args=(-- --new-project --project "$workspace_label")
+        agent_extra_args=(-- --new-project --project "$workspace_label" --mode plan)
+        if [[ -n "$model_name" ]]; then
+          agent_extra_args+=(--model "$model_name")
+        fi
+        if [[ -n "$reasoning_effort" ]]; then
+          agent_extra_args+=(--effort "$reasoning_effort")
+        fi
+      elif [[ "$agent" == "claude" ]]; then
+        agent_extra_args=(-- --permission-mode plan)
+        if [[ -n "$model_name" ]]; then
+          agent_extra_args+=(--model "$model_name")
+        fi
+        if [[ -n "$reasoning_effort" ]]; then
+          agent_extra_args+=(--effort "$reasoning_effort")
+        fi
+      elif [[ "$agent" == "codex" ]]; then
+        if [[ -n "$model_name" ]]; then
+          agent_extra_args=(-- -m "$model_name")
+        fi
       fi
       if herdr agent start "$safe_agent_name" --kind "$agent" --pane "$pane_id" "${agent_extra_args[@]}" 2>/dev/null; then
         method_prompt=""
         case "$method" in
           bmad)
-            method_prompt="BMad, analise a feature/issue $workspace_label (${summary:-$feature}). A descrição e os detalhes do Jira estão salvos em .sprout/issue.json e .sprout/issue.md. Inicie a análise inicial para elaborarmos o briefing da implementação."
+            if [[ -n "$issue" ]]; then
+              method_prompt="BMad, inicie no modo plan para planejar a tarefa/feature $workspace_label (${summary:-$feature}). A descrição e os detalhes do Jira estão salvos em .sprout/issue.json e .sprout/issue.md. Elabore o plano de implementação antes de realizar alterações no código e aguarde confirmação."
+            else
+              method_prompt="BMad, inicie no modo plan para planejar a tarefa $workspace_label (${summary:-$feature}). O briefing e contexto inicial estão salvos em .sprout/issue.json e .sprout/issue.md. Elabore o plano de implementação antes de realizar alterações no código e aguarde confirmação."
+            fi
             ;;
           scpe)
-            method_prompt="SCPE: analise a issue $workspace_label (${summary:-$feature}) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."
+            method_prompt="SCPE: inicie no modo plan para especificar a tarefa $workspace_label (${summary:-$feature}) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."
             ;;
           none|"")
             method_prompt=""
             ;;
           *)
-            method_prompt="Analise a issue $workspace_label (${summary:-$feature}). Detalhes disponíveis em .sprout/issue.json."
+            method_prompt="Inicie no modo plan para analisar a tarefa $workspace_label (${summary:-$feature}). Detalhes disponíveis em .sprout/issue.json. Elabore o plano antes de modificar arquivos."
             ;;
         esac
 
