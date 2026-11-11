@@ -53,7 +53,12 @@ sprout plant /path/to/existing/repo ~/workspace/finance_tool
 sprout plant git@github.com:my-org/finance_tool.git --spec specs/v2.md
 sprout plant --spec vision.md  # inside current repo
 
-# 5. Plant an empty project (no spec): greenfield is automatic for new/empty dirs.
+# 5. Plant a brand new project from a free-form prompt (no pre-existing dir or repo).
+# The prompt is saved as the spec (.sprout/spec.md) and the agent starts in plan mode.
+sprout plant "task manager in Next.js with login" ~/workspace/my_app
+sprout plant --prompt "payments API in Go" ~/workspace/payments
+
+# 6. Plant an empty project (no spec): greenfield is automatic for new/empty dirs.
 # The agent starts product discovery (bmad-brainstorming / bmad-product-brief);
 # add --no-agent to only initialize the repo.
 sprout plant meu_app
