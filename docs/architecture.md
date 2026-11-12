@@ -135,3 +135,9 @@ Sprout follows a strict **zero-secrets-in-repo** philosophy and uses Git's inter
   - Temporary authentication/API files are cleaned up.
 - **Zero-Conflict Guarantee:** Retrying a command immediately after an abort never encounters `Destination already exists` or `Branch already exists` errors.
 
+### 10. Dedicated Code Review Worktrees (`sprout review`)
+- **Zero-Flag Automatic Checkout:** When invoked with a PR number, URL, or branch (`sprout review <PR>`), Sprout automatically fetches the PR ref (`refs/pull/<number>/head`), creates an isolated review branch (`review/pr-<number>`), and checks out the code into a dedicated worktree (`review_pr_<number>`).
+- **State Resume:** If the review worktree already exists, Sprout automatically resumes it, fetches incremental updates from GitHub, refreshes the review dossier, and focuses the Herdr workspace.
+- **Full Dossier Normalization:** Generates `.sprout/review.md`, `.sprout/review.json`, and `.sprout/issue.json`, enabling agents to audit the PR diff or triage review feedback.
+- **Unified Teardown:** Integrates directly with `sprout prune` for one-command teardown of the review worktree, Herdr workspace, and local review branch.
+

@@ -164,6 +164,39 @@ sprout fix --context-file https://raw.githubusercontent.com/org/repo/main/docs/c
 
 ---
 
+## Dedicated Review Worktrees & PR Ingestion (`sprout review`)
+
+Sprout allows reviewing any pull request directly in an isolated review worktree with automatic checkout:
+
+```bash
+# Check out a PR into a dedicated review worktree and branch (e.g. ../review_pr_58 on review/pr-58)
+sprout review 58
+
+# Pass full GitHub PR URL or head branch name:
+sprout review https://github.com/my-org/finance_tool/pull/58
+sprout review feat/auth-tokens
+
+# Override the local review branch or directory name:
+sprout review 58 --branch review/auth-audit --dest ~/workspace/auth_audit
+
+# Inside an active worktree: refreshes review feedback in-place for the current branch:
+sprout review
+
+# Optional: clean context before review triage
+sprout review --recycle
+```
+
+### Review Worktree Lifecycle:
+1. **Automatic Checkout by Design:** Running `sprout review <PR>` creates a dedicated review branch (`review/pr-<number>`) and worktree (`../review_pr_<number>`), fetching the pull request head from GitHub without needing explicit checkout flags.
+2. **Resume (Retomar):** If the review worktree already exists, Sprout re-attaches to it, pulls the latest PR updates from GitHub, refreshes the review dossier, and re-focuses the Herdr workspace.
+3. **Feedback Ingestion:** Consolidates reviews, approval decisions, general PR comments, and inline diff annotations into `.sprout/review.md` and `.sprout/review.json`.
+4. **Contextual Agent Prompting:**
+   - With comments: Dispatches **BMad Review Triage** to classify feedback into Must Fix, Optional, and Out of Scope.
+   - Without comments: Prompts the agent to perform an architectural diff audit comparing against the base branch.
+5. **Clean Teardown:** Once review is done, running `sprout prune` inside the review worktree removes the worktree, closes the Herdr workspace, and deletes the local `review/pr-<number>` branch in a single command.
+
+---
+
 ## Zero-Git Greenfield Projects & Transactional Lifecycle
 
 ### Starting from Scratch with `sprout new`

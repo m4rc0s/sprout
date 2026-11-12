@@ -154,31 +154,37 @@ sprout session watch --stop
 
 The **Sentinel Watcher** (`sprout session watch --daemon`) monitors file size on disk (`transcript.jsonl`) and scrollback lines without consuming any LLM tokens. When sessions exceed the threshold (1500KB), it automatically triggers the handoff cycle while you focus on other work.
 
-### Pull Request Code Review Triage (`sprout check-review`)
+### Pull Request Code Review & Dedicated Review Worktrees (`sprout review`)
 
-Once code is pushed and a pull request is created on GitHub, reviewers leave top-level summaries, discussion comments, and line-by-line diff annotations. Sprout closes the development feedback loop with `sprout check-review` (alias: `sprout review`):
+Sprout allows reviewing any pull request directly in an isolated review worktree with automatic checkout:
 
 ```bash
-# Inside an active worktree: automatically resolves current branch and its open PR
-sprout check-review
+# Check out a PR into a dedicated review worktree and branch (e.g. ../review_pr_58 on review/pr-58)
+sprout review 58
 
-# Target a specific PR by number or GitHub URL from anywhere:
-sprout check-review 58
-sprout check-review https://github.com/my-org/finance_tool/pull/58
+# Pass full GitHub PR URL or head branch name:
+sprout review https://github.com/my-org/finance_tool/pull/58
+sprout review feat/auth-tokens
+
+# Override the local review branch or directory name:
+sprout review 58 --branch review/auth-audit --dest ~/workspace/auth_audit
+
+# Inside an active worktree: refreshes review feedback in-place for the current branch:
+sprout review
 
 # Optional: clean context before review triage
-sprout check-review --recycle
+sprout review --recycle
 ```
 
-**What it does (100% Deterministic, Zero Duplicate Workspaces):**
-1. **GitHub CLI Ingestion (`gh`):** Fetches PR metadata, review verdicts (`CHANGES_REQUESTED`, `APPROVED`), general discussion comments, and inline code comments (`path`, `line`, `diff_hunk`).
-2. **Review Dossier:** Consolidates all feedback into `.sprout/review.md` and `.sprout/review.json` grouped cleanly by file and line number.
-3. **Herdr Workspace & Auto-Spawn Re-use:** Locates the existing Herdr workspace and pane for that worktree, focusing it rather than spawning duplicate windows. If the agent session had ended or was closed, it automatically auto-spawns a fresh agent into the pane using `.sprout/session.json`.
-4. **BMad Review Triage Kickoff:** Automatically submits the BMad Review Triage prompt instructing the agent to act as a senior technical lead:
-   - 🔴 **[Must Fix / Bloqueante]**: Critical fixes required for immediate PR approval.
-   - 🟡 **[Opcional / Sugestão Rápida]**: Low-effort cosmetic or readability suggestions.
-   - 🔵 **[Fora de Escopo / Split]**: Out-of-scope feature requests or large architectural expansions (*scope creep*) that should be split into new backlog issues.
-   - 📋 **Resolution Plan**: Generates an ordered fix plan for developer approval before applying code changes.
+**Automatic Checkout & Resume By Design:**
+1. **Zero-Flag Dedicated Worktree:** Whenever called with a PR argument (`sprout review <PR>`), Sprout automatically creates a dedicated worktree and review branch (`review/pr-<number>`) and checks out the PR code without requiring any extra checkout flags.
+2. **Intelligent Resume (Retomar):** If the review worktree already exists, Sprout automatically resumes it, fetches the latest commits from GitHub (`refs/pull/<number>/head`), refreshes the review dossier, and re-focuses the Herdr workspace.
+3. **GitHub CLI Ingestion (`gh`):** Fetches PR metadata, review verdicts (`CHANGES_REQUESTED`, `APPROVED`), general discussion comments, and inline code comments (`path`, `line`, `diff_hunk`).
+4. **Review Dossier:** Consolidates all feedback into `.sprout/review.md` and `.sprout/review.json` grouped cleanly by file and line number.
+5. **Herdr Workspace & Auto-Spawn:** Opens or focuses the Herdr workspace (`review-pr-<number>`) and starts the agent in plan mode:
+   - If review comments exist: runs **BMad Review Triage** to classify feedback into Must Fix, Optional, and Out of Scope.
+   - If 0 review comments: prompts the agent to perform an architectural diff audit comparing against the base branch.
+6. **Clean Teardown:** Once review is done, running `sprout prune` inside the review worktree removes the worktree, closes the Herdr workspace, and deletes the local `review/pr-<number>` branch in a single command.
 
 
 ### Autopilot: workflows that start on their own (`sprout autopilot`)

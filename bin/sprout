@@ -19,7 +19,8 @@ Usage:
   sprout session <status|recycle|watch> [options]
   sprout agent <status|cooldown|reset> [options]
   sprout autopilot <once|run|start|status|stop> [options]
-  sprout check-review [PR_NUMBER_OR_URL] [options]
+  sprout check-review [PR_NUMBER_OR_URL_OR_BRANCH] [options]
+  sprout review [PR_NUMBER_OR_URL_OR_BRANCH] [options]
   sprout prune [TARGET] [options]
   sprout <type> [TEXT | URL | --context <TEXT>] [options]
   sprout <type> (--issue <ISSUE-KEY> | --feature <name> | --link <URL>) [options]
@@ -29,8 +30,9 @@ Project Creation & Initialization:
   sprout plant [URL|PATH|SPEC] [DIR] [options] Plant base repo from Git URL, local path, or spec doc (.md/.html)
   sprout init                                  Interactive initialization inside an existing base repository
 
-Code Review Ingestion & Triage:
-  sprout check-review [PR|URL]                 Ingest PR feedback & inline comments and trigger BMad Triage (alias: review)
+Code Review Ingestion & Dedicated Review Worktrees:
+  sprout review [PR|URL|BRANCH] [options]      Check out or resume a PR in a dedicated review worktree & workspace
+  sprout check-review [PR|URL|BRANCH]          (alias for sprout review)
 
 Branch Synchronization:
   sprout sync [options]                        Fetch latest origin/main and rebase current branch onto it (alias: rebase)
@@ -2258,9 +2260,26 @@ check_review_subcommand() {
   local agent_override=""
   local model_override=""
   local effort_override=""
+  local branch_override=""
+  local dest_override=""
+  local force=false
 
   while (($#)); do
     case "$1" in
+      -b|--branch)
+        (($# >= 2)) || { printf 'Missing value for --branch\n' >&2; exit 2; }
+        branch_override="$2"
+        shift 2
+        ;;
+      --dest)
+        (($# >= 2)) || { printf 'Missing value for --dest\n' >&2; exit 2; }
+        dest_override="$2"
+        shift 2
+        ;;
+      -f|--force)
+        force=true
+        shift
+        ;;
       --no-prompt)
         no_prompt=true
         shift
@@ -2297,13 +2316,22 @@ check_review_subcommand() {
       -h|--help)
         cat >&2 <<'HELPREVIEW'
 Usage:
-  sprout check-review [PR_NUMBER_OR_URL] [options]
-  sprout review [PR_NUMBER_OR_URL] [options]
+  sprout review [PR_NUMBER_OR_URL_OR_BRANCH] [options]
+  sprout check-review [PR_NUMBER_OR_URL_OR_BRANCH] [options]
+
+Automatic Checkout & Review Worktrees:
+  When called with a PR number, URL, or branch, Sprout automatically creates a dedicated
+  review worktree and branch (review/pr-<NUMBER>), checks out the PR code, and opens a
+  focused Herdr workspace. If the review worktree already exists, it seamlessly resumes it,
+  pulls latest PR updates, and re-focuses the workspace.
 
 Options:
-  --no-prompt          Download and snapshot PR review without submitting prompt to agent
-  --recycle            Snapshot state and recycle agent session with clean context before review triage
-  -a, --agent AGENT    Target specific agent (codex, claude, agy)
+  -b, --branch BRANCH  Local review branch name (default: review/pr-<NUMBER>)
+  --dest PATH          Destination directory for the review worktree
+  -f, --force          Force-update branch on resume even if diverged
+  --no-prompt          Create/update review worktree without submitting prompt to agent
+  --recycle            Snapshot state and recycle agent session with clean context
+  -a, --agent AGENT    Target specific agent (auto, codex, claude, agy)
   -m, --model MODEL    Target specific model override
   -e, --effort EFFORT  Target reasoning effort (low, medium, high)
   --repo REPO          Explicit GitHub repository (e.g. owner/repo)
@@ -2311,20 +2339,24 @@ Options:
   -h, --help           Show this help
 
 Examples:
-  # Inside an active worktree with an open PR on current branch:
-  sprout check-review
+  # Check out PR into dedicated review worktree (creates or resumes review/pr-58):
+  sprout review 58
+  sprout review https://github.com/my-org/finance_tool/pull/58
+  sprout review feat/auth-tokens
 
-  # Specify PR number or GitHub PR URL:
-  sprout check-review 58
-  sprout check-review https://github.com/my-org/finance_tool/pull/58
+  # With custom review branch or directory:
+  sprout review 58 --branch review/auth-audit --dest ~/workspace/auth_audit
+
+  # Inside an active worktree, refresh feedback for current branch:
+  sprout review
 
   # Recycle bloated context before review triage:
-  sprout check-review --recycle
+  sprout review --recycle
 HELPREVIEW
         exit 0
         ;;
       -*)
-        printf 'Unknown option for check-review: %s\n' "$1" >&2
+        printf 'Unknown option for review: %s\n' "$1" >&2
         exit 2
         ;;
       *)
@@ -2338,6 +2370,8 @@ HELPREVIEW
         ;;
     esac
   done
+
+  pr_arg="${pr_arg#'#'}"
 
   command -v gh >/dev/null 2>&1 || {
     printf 'Error: GitHub CLI (gh) is required for sprout check-review.\nInstall it or visit https://cli.github.com\n' >&2
@@ -2406,75 +2440,139 @@ PYMETA
   printf '   Branch:        %s ➔ %s (%s)\n' "$pr_head" "$pr_base" "$pr_state"
   printf '   Decision:      %s\n' "$pr_decision"
 
-  # Locate matching worktree
-  local target_worktree=""
-  if [[ -n "$cur_git_root" && "$cur_branch" == "$pr_head" ]]; then
-    target_worktree="$cur_git_root"
-  else
-    target_worktree=$(python3 - "$pr_head" "$pr_repo" "$cur_git_root" <<'PYLOCATE_WT'
-import json, subprocess, sys
-from pathlib import Path
-
-pr_head = sys.argv[1].strip()
-pr_repo = sys.argv[2].strip()
-cur_root = sys.argv[3].strip()
-slug = pr_head.split("/")[-1]
-repo_name = pr_repo.split("/")[-1] if "/" in pr_repo else pr_repo
-
-target = None
-
-# 1. Check Herdr agents cwd
-try:
-    out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
-    for ag in (json.loads(out).get("result") or {}).get("agents") or []:
-        cwd = Path(ag.get("cwd") or "")
-        if cwd.name == slug or cwd.name.lower() == slug.lower() or cwd.name.replace("-", "_") == slug.replace("-", "_"):
-            if cwd.is_dir():
-                target = str(cwd.resolve())
-                break
-except Exception:
-    pass
-
-# 2. Check base repository worktree list
-if not target:
-    candidates = []
-    if cur_root:
-        candidates.append(Path(cur_root))
-    if repo_name:
-        candidates.append(Path.home() / "workspace" / repo_name)
-        candidates.append(Path.cwd().parent / repo_name)
-    for b in candidates:
-        if b.is_dir():
-            wt_out = subprocess.getoutput(f"git -C '{b}' worktree list 2>/dev/null")
-            for line in wt_out.splitlines():
-                if f"[{pr_head}]" in line:
-                    p = Path(line.split()[0])
-                    if p.is_dir():
-                        target = str(p.resolve())
-                        break
-        if target:
-            break
-
-# 3. Check standard workspace sibling directory
-if not target:
-    for base in [Path.home() / "workspace", Path.cwd().parent]:
-        cand = base / slug
-        if cand.is_dir() and (cand / ".git").exists():
-            target = str(cand.resolve())
-            break
-
-if target:
-    print(target)
-PYLOCATE_WT
-    )
+  # 1. Resolve base repository
+  local base_repo=""
+  if [[ -n "$cur_git_root" ]]; then
+    local resolved
+    resolved=$(resolve_repository "$cur_git_root" 2>/dev/null || true)
+    if [[ -n "$resolved" ]]; then
+      base_repo=$(sed -n '1p' <<< "$resolved")
+    else
+      base_repo="$cur_git_root"
+    fi
+  elif [[ -n "$pr_repo" ]]; then
+    local repo_short=${pr_repo#*/}
+    for cand in "$HOME/workspace/$repo_short" "$PWD/$repo_short" "$PWD/../$repo_short"; do
+      if [[ -d "$cand/.git" ]]; then
+        base_repo=$(cd "$cand" && pwd -P)
+        break
+      fi
+    done
   fi
 
-  if [[ -z "$target_worktree" || ! -d "$target_worktree" ]]; then
-    if [[ -n "$cur_git_root" ]]; then
-      target_worktree="$cur_git_root"
-    else
-      printf 'Error: Could not locate local worktree for branch %s.\n' "$pr_head" >&2
+  if [[ -z "$base_repo" || ! -d "$base_repo" ]]; then
+    printf 'Error: Cannot locate local base repository for %s. Run inside the repository or specify --repo.\n' "${pr_repo:-PR}" >&2
+    exit 1
+  fi
+
+  # 2. Determine review worktree and branch
+  local target_worktree=""
+  local review_branch=""
+  local is_resume=false
+
+  if [[ -z "$pr_arg" ]]; then
+    # In-place triage: User ran sprout review without arguments inside an existing worktree
+    target_worktree="$cur_git_root"
+    review_branch="$cur_branch"
+    is_resume=true
+  else
+    # PR explicitly provided: sprout review <PR_URL_OU_NO>
+    # Always checkout or resume a dedicated review worktree!
+    review_branch="${branch_override:-review/pr-$pr_number}"
+    local default_target="$(dirname "$base_repo")/review_pr_$pr_number"
+    target_worktree="${dest_override:-$default_target}"
+
+    # Check if target_worktree is already an active worktree
+    if git -C "$base_repo" worktree list --porcelain 2>/dev/null | grep -Fq "worktree $target_worktree"; then
+      is_resume=true
+    elif git -C "$base_repo" show-ref --verify --quiet "refs/heads/$review_branch"; then
+      # Check if review branch is checked out in any worktree
+      local existing_wt
+      existing_wt=$(git -C "$base_repo" worktree list --porcelain 2>/dev/null | python3 - "$review_branch" <<'PYFIND_WT'
+import sys
+branch = sys.argv[1]
+lines = sys.stdin.read().splitlines()
+cur_wt = ""
+for line in lines:
+    if line.startswith("worktree "):
+        cur_wt = line.split(" ", 1)[1].strip()
+    elif line.startswith("branch "):
+        b = line.split(" ", 1)[1].strip()
+        if b == f"refs/heads/{branch}" and cur_wt:
+            print(cur_wt)
+            sys.exit(0)
+PYFIND_WT
+      )
+      if [[ -n "$existing_wt" && -d "$existing_wt" ]]; then
+        target_worktree="$existing_wt"
+        is_resume=true
+      fi
+    fi
+  fi
+
+  local remote="origin"
+  if ! git -C "$base_repo" remote 2>/dev/null | grep -q "^origin$"; then
+    remote=$(git -C "$base_repo" remote 2>/dev/null | head -n 1)
+  fi
+
+  if [[ "$is_resume" == "true" ]]; then
+    printf '\n🔄 [Sprout Review] Retomando revisão existente em %s (branch: %s)...\n' "$target_worktree" "$review_branch"
+    if [[ -n "$remote" && -n "$pr_number" ]]; then
+      printf '   Buscando atualizações mais recentes do PR #%s...\n' "$pr_number"
+      git -C "$target_worktree" fetch "$remote" "pull/$pr_number/head" >/dev/null 2>&1 || true
+      if git -C "$target_worktree" diff --quiet 2>/dev/null && git -C "$target_worktree" diff --cached --quiet 2>/dev/null; then
+        git -C "$target_worktree" merge --ff-only FETCH_HEAD >/dev/null 2>&1 || git -C "$target_worktree" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
+      elif [[ "$force" == "true" ]]; then
+        git -C "$target_worktree" reset --hard FETCH_HEAD >/dev/null 2>&1 || true
+      fi
+    fi
+  else
+    printf '\n🌿 [Sprout Review] Criando nova worktree de revisão para o PR #%s...\n' "$pr_number"
+    printf '   Branch de revisão: %s\n' "$review_branch"
+    printf '   Destino:           %s\n' "$target_worktree"
+
+    if [[ -e "$target_worktree" ]]; then
+      printf 'Error: Destination already exists and is not a review worktree: %s\n' "$target_worktree" >&2
       exit 1
+    fi
+
+    WORKTREE_TX_REPO="$base_repo"
+    WORKTREE_TX_TARGET="$target_worktree"
+    WORKTREE_TX_BRANCH="$review_branch"
+    trap rollback_worktree_transaction INT TERM HUP EXIT
+
+    if [[ -n "$remote" && -n "$pr_number" ]]; then
+      printf '   Baixando código do PR #%s do remote %s...\n' "$pr_number" "$remote"
+      if ! git -C "$base_repo" fetch -f "$remote" "pull/$pr_number/head:$review_branch" >/dev/null 2>&1; then
+        git -C "$base_repo" fetch -f "$remote" "$pr_head:$review_branch" >/dev/null 2>&1 || {
+          printf 'Error: Falha ao baixar os commits do PR #%s via git fetch.\n' "$pr_number" >&2
+          exit 1
+        }
+      fi
+    elif git -C "$base_repo" show-ref --verify --quiet "refs/heads/$pr_head"; then
+      git -C "$base_repo" branch -f "$review_branch" "$pr_head" >/dev/null 2>&1
+    else
+      printf 'Error: Cannot find commits for branch %s.\n' "$pr_head" >&2
+      exit 1
+    fi
+
+    git -C "$base_repo" worktree add "$target_worktree" "$review_branch" >/dev/null 2>&1 || {
+      printf 'Error: Falha ao criar worktree em %s na branch %s.\n' "$target_worktree" "$review_branch" >&2
+      exit 1
+    }
+
+    if [[ -d "$base_repo/_bmad/custom" ]]; then
+      while IFS= read -r -d '' bmad_user_file; do
+        bmad_rel=${bmad_user_file#"$base_repo"/}
+        mkdir -p "$target_worktree/$(dirname "$bmad_rel")"
+        ln -sfn "$bmad_user_file" "$target_worktree/$bmad_rel"
+      done < <(find "$base_repo/_bmad/custom" -name '*.user.toml' -print0 2>/dev/null)
+    fi
+    if [[ -d "$base_repo/_bmad" ]]; then
+      while IFS= read -r -d '' bmad_untracked_file; do
+        mkdir -p "$target_worktree/$(dirname "$bmad_untracked_file")"
+        cp -p "$base_repo/$bmad_untracked_file" "$target_worktree/$bmad_untracked_file"
+      done < <(git -C "$base_repo" ls-files --others --exclude-standard -z -- _bmad)
     fi
   fi
 
@@ -2674,10 +2772,34 @@ PYPARSE_REV
 }
 EOF
 
-  local bmad_prompt="BMad, analise os apontamentos de review do PR #$pr_number em .sprout/review.md no modo plan.
-Apresente de forma direta e objetiva o plano das correções necessárias no código e aguarde confirmação para aplicar."
+  cat > "$target_worktree/.sprout/issue.json" <<EOF
+{
+  "key": "$review_branch",
+  "summary": "Review PR #$pr_number: $pr_title",
+  "status": "Reviewing",
+  "type": "Review",
+  "priority": "Medium",
+  "assignee": "${USER:-reviewer}",
+  "description": "Code review worktree for PR #$pr_number ($pr_title).\nHead branch: $pr_head\nBase branch: $pr_base",
+  "source": "github_pr",
+  "url": "https://github.com/$pr_repo/pull/$pr_number"
+}
+EOF
+
+  local bmad_prompt
+  if [[ "$inline_count" -gt 0 || "$rev_count" -gt 0 || "$comm_count" -gt 0 ]]; then
+    bmad_prompt="BMad, analise os apontamentos de review do PR #$pr_number ($pr_title) no modo plan.
+Os apontamentos e comentários de review estão salvos em .sprout/review.md.
+Apresente de forma direta e objetiva a análise crítica dos feedbacks e o plano de ação/correções necessárias no código e aguarde confirmação."
+  else
+    bmad_prompt="BMad, inicie a auditoria e revisão de código do PR #$pr_number ($pr_title) no modo plan.
+Analise as alterações em relação a $pr_base, verificando qualidade, conformidade arquitetural, possíveis regressões e casos de borda.
+Apresente seu parecer estruturado em .sprout/review.md e aguarde confirmação."
+  fi
 
   if [[ "$no_prompt" == "true" ]]; then
+    WORKTREE_TX_COMMITTED=true
+    trap - INT TERM HUP EXIT
     printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree"
     return 0 2>/dev/null || exit 0
   fi
@@ -2689,6 +2811,8 @@ Apresente de forma direta e objetiva o plano das correções necessárias no có
   fi
 
   if [[ "$is_current_terminal" == "true" ]]; then
+    WORKTREE_TX_COMMITTED=true
+    trap - INT TERM HUP EXIT
     printf '\n🚀 Launching interactive %s session for BMad Review Triage (mode: plan)...\n' "$chosen_agent"
     cd "$target_worktree"
     if [[ "$chosen_agent" == "agy" ]]; then
@@ -2710,12 +2834,14 @@ Apresente de forma direta e objetiva o plano das correções necessárias no có
   # 2. Remote orchestration via Herdr (when run from outside the target worktree)
   if command -v herdr >/dev/null 2>&1 && herdr status client >/dev/null 2>&1; then
     local agent_info
-    agent_info=$(python3 - "$target_worktree" "${pane_override:-}" <<'PYAGENT_FIND'
+    agent_info=$(python3 - "$target_worktree" "${pane_override:-}" "${pr_number:-}" <<'PYAGENT_FIND'
 import json, subprocess, sys
 from pathlib import Path
 
 target_root = Path(sys.argv[1]).resolve()
 pane_ovr = sys.argv[2].strip()
+pr_num = sys.argv[3].strip() if len(sys.argv) > 3 else ""
+ws_label = f"review-pr-{pr_num}" if pr_num else target_root.name
 
 # 1. Search for active agent in herdr agent list
 try:
@@ -2756,7 +2882,7 @@ except Exception:
 # 3. Create fresh workspace
 try:
     ws_out = subprocess.check_output(
-        ["herdr", "workspace", "create", "--cwd", str(target_root), "--label", target_root.name, "--focus"],
+        ["herdr", "workspace", "create", "--cwd", str(target_root), "--label", ws_label, "--focus"],
         stderr=subprocess.DEVNULL
     )
     ws_data = (json.loads(ws_out).get("result") or {})
@@ -2823,6 +2949,9 @@ PYAGENT_FIND
   else
     printf '\nReview dossier saved to %s/.sprout/review.md.\nTo enter worktree: cd %q\n' "$target_worktree" "$target_worktree"
   fi
+
+  WORKTREE_TX_COMMITTED=true
+  trap - INT TERM HUP EXIT
 }
 
 configure_jira() {
