@@ -80,12 +80,12 @@ Sprout follows a strict **zero-secrets-in-repo** philosophy and uses Git's inter
 
 ## Architectural Layers
 
-### 1. Tracker & Auth Layer
-- Communicates with Jira Cloud using Atlassian API Gateway (`https://api.atlassian.com/ex/jira/<cloudId>`) and scoped tokens.
-- Discovers the tenant Cloud ID via `/_edge/tenant_info`.
-- Resolves issue details (`summary`, `description`, `issuetype`, `status`, `priority`, `assignee`).
-- Converts all ticket data into the tracker-neutral `.sprout/` contract below, so other providers (Linear, GitHub Issues) can plug in without changing downstream consumers.
-- Decouples credentials (`~/.sprout/auth.toml`, chmod 600) from source repositories (with backward compatibility fallback to `~/.jdw/auth.toml`).
+### 1. Ingestion, Tracker & Auth Layer
+- **Jira Cloud:** Communicates with Jira Cloud using Atlassian API Gateway (`https://api.atlassian.com/ex/jira/<cloudId>`) and scoped tokens. Discovers tenant Cloud ID via `/_edge/tenant_info` and converts Jira ADF into clean plain-text/markdown.
+- **Web & Document Links:** Ingests remote URLs (HTML articles, specs, or raw Markdown) via `curl -sL --fail` and a zero-dependency Python `HTMLParser`, extracting deterministic title, slug, and clean Markdown body while preserving code blocks and links.
+- **Free-form Text:** Supports direct command-line prompts and piped stdin (`-c -`), automatically deriving slug and complexity signals.
+- **Contract Normalization:** Converts all sources into the tracker-neutral `.sprout/` contract below (`source: "jira" | "url" | "manual"`), so agents and methodologies consume uniform payloads.
+- **Credentials Security:** Decouples credentials (`~/.sprout/auth.toml`, chmod 600) from source repositories (with backward compatibility fallback to `~/.jdw/auth.toml`).
 
 ### 2. Git Worktree Layer
 - Auto-detects the canonical repository even when executed from an existing worktree (via `--git-common-dir`).

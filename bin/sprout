@@ -12,8 +12,8 @@ usage() {
 Usage:
   sprout new <NAME_OR_PATH> [options]
   sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
-  sprout plant [SPEC_DOC] [DEST_DIR] [options]
-  sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
+  sprout plant [SPEC_DOC_OR_URL] [DEST_DIR] [options]
+  sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC_OR_URL> [options]
   sprout plant "<PROMPT>" [DEST_DIR] [options]
   sprout init
   sprout session <status|recycle|watch> [options]
@@ -21,8 +21,8 @@ Usage:
   sprout autopilot <once|run|start|status|stop> [options]
   sprout check-review [PR_NUMBER_OR_URL] [options]
   sprout prune [TARGET] [options]
-  sprout <type> [TEXT | --context <TEXT>] [options]
-  sprout <type> (--issue <ISSUE-KEY> | --feature <name>) [options]
+  sprout <type> [TEXT | URL | --context <TEXT>] [options]
+  sprout <type> (--issue <ISSUE-KEY> | --feature <name> | --link <URL>) [options]
 
 Project Creation & Initialization:
   sprout new <NAME> [options]                  Create brand new project from scratch (zero Git pre-requisites)
@@ -56,10 +56,12 @@ Agent Management:
 Types: feat, fix, doc, docs, style, refactor, perf, test, build, ci, chore, revert
 Options:
   TEXT                 Optional positional text describing the task/goal (bypasses Jira)
+  URL                  Optional positional URL to an article, spec, or doc to ingest as task context
+  --link URL           URL to an article, spec, or documentation page to ingest as task context
   -c, --context TEXT   Free-form task context (use '-' to read from stdin)
-  --context-file FILE  Read task context from a markdown or text file
+  --context-file FILE_OR_URL Read task context from a markdown/text file or remote URL
   -p, --prompt TEXT    Inline project idea or prompt (for sprout new / plant)
-  -s, --spec PATH      Path to vision, PRD, or spec document (.md, .html) to bootstrap project from
+  -s, --spec PATH_OR_URL Path or URL to vision, PRD, or spec document (.md, .html) to bootstrap project from
   -b, --branch BRANCH  Branch to checkout (used with new/plant; defaults to main or remote default)
   --dest PATH          Destination directory (defaults to repo name or derived project slug)
   --name NAME          Project display name (defaults to repository name or document title)
@@ -110,6 +112,11 @@ Examples:
   sprout fix --issue FT-123
   sprout feat --issue FT-456 --agent agy --method scpe
 
+  # Sprout worktrees from an article or documentation link:
+  sprout feat https://eng.uber.com/circuit-breaking-architecture/
+  sprout feat "Implementar Circuit Breaker" --link https://martinfowler.com/articles/.../circuit-breaker.html
+  sprout fix --link https://example.com/blog/memory-leak-fix.md
+
   # Tear down a finished worktree (run from inside it, or name it from elsewhere):
   sprout prune
   sprout prune ft_123 --yes
@@ -134,11 +141,15 @@ WORKTREE_TX_REPO=""
 WORKTREE_TX_HERDR_WS=""
 WORKTREE_TX_NETRC=""
 WORKTREE_TX_RESPFILE=""
+WORKTREE_TX_LINK_TMP=""
+WORKTREE_TX_LINK_JSON=""
 
 rollback_worktree_transaction() {
   local exit_code=$?
   [[ -z "$WORKTREE_TX_NETRC" || ! -f "$WORKTREE_TX_NETRC" ]] || rm -f "$WORKTREE_TX_NETRC"
   [[ -z "$WORKTREE_TX_RESPFILE" || ! -f "$WORKTREE_TX_RESPFILE" ]] || rm -f "$WORKTREE_TX_RESPFILE"
+  [[ -z "${WORKTREE_TX_LINK_TMP:-}" || ! -f "$WORKTREE_TX_LINK_TMP" ]] || rm -f "$WORKTREE_TX_LINK_TMP"
+  [[ -z "${WORKTREE_TX_LINK_JSON:-}" || ! -f "$WORKTREE_TX_LINK_JSON" ]] || rm -f "$WORKTREE_TX_LINK_JSON"
 
   if [[ "${WORKTREE_TX_COMMITTED:-false}" != "true" && "${WORKTREE_TX_ROLLED_BACK:-false}" != "true" ]]; then
     WORKTREE_TX_ROLLED_BACK=true
@@ -200,6 +211,236 @@ PYFIND_TX
     fi
   fi
   exit "$exit_code"
+}
+
+fetch_and_parse_url() {
+  local url="$1"
+  local raw_file="$2"
+  local json_file="$3"
+
+  command -v curl >/dev/null || { printf 'curl is required to fetch context from URLs.\n' >&2; return 1; }
+  command -v python3 >/dev/null || { printf 'python3 is required to parse web and document content.\n' >&2; return 1; }
+
+  printf '\n🌐 Ingesting context from link: %s...\n' "$url"
+  local http_meta
+  http_meta=$(curl -sL --fail --max-time 20 \
+    -H "User-Agent: Mozilla/5.0 (compatible; Sprout/1.0; +https://github.com/m4rc0s/sprout)" \
+    -w "%{content_type}\t%{http_code}" \
+    -o "$raw_file" "$url" 2>&1)
+  local curl_code=$?
+
+  if [[ $curl_code -ne 0 ]]; then
+    printf 'Error: Failed to fetch URL %s (curl exited with code %s).\n' "$url" "$curl_code" >&2
+    return 1
+  fi
+
+  local content_type
+  content_type=$(awk -F'\t' '{print $1}' <<< "$http_meta")
+
+  python3 - "$raw_file" "$url" "$content_type" "$json_file" <<'PYPARSE_URL'
+import sys, re, unicodedata, json, html
+from html.parser import HTMLParser
+from urllib.parse import urlparse
+from pathlib import Path
+
+raw_file = Path(sys.argv[1])
+url = sys.argv[2]
+content_type = sys.argv[3].lower()
+out_json_path = Path(sys.argv[4])
+
+try:
+    raw_content = raw_file.read_text(encoding="utf-8", errors="replace")
+except Exception:
+    raw_content = ""
+
+is_html = False
+if "text/html" in content_type or url.endswith((".html", ".htm")):
+    is_html = True
+elif not content_type and ("<!doctype html" in raw_content[:500].lower() or "<html" in raw_content[:500].lower()):
+    is_html = True
+
+title = ""
+description = ""
+body = ""
+
+if is_html:
+    class HtmlToMarkdown(HTMLParser):
+        IGNORED = {"script", "style", "nav", "footer", "header", "aside", "noscript", "svg", "head", "iframe"}
+        def __init__(self):
+            super().__init__()
+            self.og_title = ""
+            self.meta_desc = ""
+            self.title_tag = ""
+            self.h1_title = ""
+            self.in_title = False
+            self.title_parts = []
+            self.ignore_depth = 0
+            self.in_pre = False
+            self.article_depth = 0
+            self.seen_article = False
+            self.parts = []
+            self.article_parts = []
+            self.current_a = None
+
+        def handle_starttag(self, tag, attrs):
+            attr_dict = {k.lower(): (v or "") for k, v in attrs}
+            if tag == "title":
+                self.in_title = True
+            elif tag == "meta":
+                prop = attr_dict.get("property", "").lower()
+                name = attr_dict.get("name", "").lower()
+                content = attr_dict.get("content", "").strip()
+                if prop in ("og:title", "twitter:title"):
+                    if not self.og_title: self.og_title = content
+                elif prop in ("og:description", "description", "twitter:description") or name in ("description", "twitter:description"):
+                    if not self.meta_desc: self.meta_desc = content
+
+            if tag in self.IGNORED:
+                self.ignore_depth += 1
+                return
+            if self.ignore_depth > 0:
+                return
+
+            if tag in ("article", "main"):
+                self.article_depth += 1
+                self.seen_article = True
+
+            if tag == "h1" and not self.h1_title:
+                self.h1_title = True
+            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                level = int(tag[1])
+                self.emit(f"\n\n{'#' * level} ")
+            elif tag in ("p", "div", "section"):
+                self.emit("\n\n")
+            elif tag == "li":
+                self.emit("\n- ")
+            elif tag == "pre":
+                self.in_pre = True
+                self.emit("\n\n```\n")
+            elif tag == "code" and not self.in_pre:
+                self.emit("`")
+            elif tag == "br":
+                self.emit("\n")
+            elif tag == "a":
+                href = attr_dict.get("href", "").strip()
+                if href and not href.startswith(("#", "javascript:")):
+                    self.current_a = href
+
+        def handle_endtag(self, tag):
+            if tag == "title":
+                self.in_title = False
+                self.title_tag = "".join(self.title_parts).strip()
+            if tag in self.IGNORED:
+                self.ignore_depth = max(0, self.ignore_depth - 1)
+                return
+            if self.ignore_depth > 0:
+                return
+
+            if tag in ("article", "main"):
+                self.article_depth = max(0, self.article_depth - 1)
+
+            if tag == "pre":
+                self.in_pre = False
+                self.emit("\n```\n\n")
+            elif tag == "code" and not self.in_pre:
+                self.emit("`")
+            elif tag == "a":
+                self.current_a = None
+            elif tag in ("p", "div", "section", "h1", "h2", "h3", "h4", "h5", "h6"):
+                self.emit("\n\n")
+
+        def handle_data(self, data):
+            if self.in_title:
+                self.title_parts.append(data)
+            if self.ignore_depth > 0:
+                return
+            if self.h1_title is True:
+                self.h1_title = data.strip()
+            if self.current_a:
+                self.emit(f"[{data.strip()}]({self.current_a})")
+            else:
+                self.emit(data)
+
+        def emit(self, text):
+            target = self.article_parts if (self.seen_article and self.article_depth > 0) else self.parts
+            target.append(text)
+            if self.seen_article and self.article_depth > 0:
+                self.parts.append(text)
+
+        def get_content(self):
+            t = self.og_title or (self.h1_title if isinstance(self.h1_title, str) and self.h1_title else "") or self.title_tag
+            if not self.og_title and t:
+                t = re.split(r'\s+[|\-–—]\s+', t)[0].strip()
+            chosen_parts = self.article_parts if (self.seen_article and self.article_parts) else self.parts
+            text = "".join(chosen_parts)
+            lines = []
+            in_code = False
+            for line in text.splitlines():
+                if line.strip().startswith("```"):
+                    in_code = not in_code
+                    lines.append(line.strip())
+                elif in_code:
+                    lines.append(line)
+                else:
+                    cleaned_line = line.strip()
+                    lines.append(cleaned_line)
+            clean_text = re.sub(r'\n{3,}', '\n\n', "\n".join(lines)).strip()
+            return html.unescape(t), html.unescape(self.meta_desc), html.unescape(clean_text)
+
+    parser = HtmlToMarkdown()
+    parser.feed(raw_content)
+    title, description, body = parser.get_content()
+else:
+    for line in raw_content.splitlines():
+        line_s = line.strip()
+        if line_s.startswith("# ") and not title:
+            title = line_s.lstrip("# ").strip()
+            break
+        elif re.match(r"^title\s*[:=]\s*['\"]?(.*?)['\"]?$", line_s, re.I) and not title:
+            title = re.match(r"^title\s*[:=]\s*['\"]?(.*?)['\"]?$", line_s, re.I).group(1).strip()
+            break
+    if not title:
+        for line in raw_content.splitlines():
+            if line.strip():
+                title = line.strip()[:80]
+                break
+    body = raw_content.strip()
+
+if not title and url:
+    parsed_url = urlparse(url)
+    path_stem = parsed_url.path.strip("/").split("/")[-1]
+    path_stem = re.sub(r'\.[a-zA-Z0-9]+$', '', path_stem)
+    title = path_stem.replace("-", " ").replace("_", " ").title()
+
+title = title or "URL Task"
+
+norm = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+norm = re.sub(r"[^\w\s-]", "", norm).strip().lower()
+words = [re.sub(r"[-\s]+", "", w) for w in norm.split() if w]
+stop_words = {"de", "do", "da", "dos", "das", "no", "na", "nos", "nas", "em", "para", "com", "por", "the", "a", "an", "of", "in", "on", "for", "with", "to", "and", "e"}
+res = []
+cur_len = 0
+for w in words:
+    add_len = len(w) + (1 if res else 0)
+    if cur_len + add_len > 32 and res:
+        break
+    res.append(w)
+    cur_len += add_len
+while len(res) > 1 and res[-1] in stop_words:
+    res.pop()
+slug = "_".join(res) or "task"
+
+res_obj = {
+    "title": title,
+    "slug": slug,
+    "description": description,
+    "body": body,
+    "url": url
+}
+
+out_json_path.write_text(json.dumps(res_obj, indent=2, ensure_ascii=False), encoding="utf-8")
+PYPARSE_URL
+  return $?
 }
 
 evaluate_agent_routing() {
@@ -2975,16 +3216,39 @@ PLANTHelp
     prompt_mode=true
   fi
 
+  local remote_spec_tmp=""
   if [[ -n "$spec_input" ]]; then
-    if [[ ! -f "$spec_input" ]]; then
-      printf 'Error: Specification document not found: %s\n' "$spec_input" >&2
-      exit 1
-    fi
-    spec_file=$(cd "$(dirname "$spec_input")" && pwd -P)/$(basename "$spec_input")
+    if [[ "$spec_input" =~ ^https?:// ]]; then
+      local raw_spec_tmp json_spec_tmp
+      raw_spec_tmp=$(mktemp)
+      json_spec_tmp=$(mktemp)
+      WORKTREE_TX_LINK_TMP="$raw_spec_tmp"
+      WORKTREE_TX_LINK_JSON="$json_spec_tmp"
+      if ! fetch_and_parse_url "$spec_input" "$raw_spec_tmp" "$json_spec_tmp"; then
+        rm -f "$raw_spec_tmp" "$json_spec_tmp"
+        exit 1
+      fi
+      local u_title u_slug u_body
+      u_title=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('title',''))" "$json_spec_tmp" 2>/dev/null || echo "")
+      u_slug=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('slug',''))" "$json_spec_tmp" 2>/dev/null || echo "")
+      u_body=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('body',''))" "$json_spec_tmp" 2>/dev/null || echo "")
+      remote_spec_tmp=$(mktemp --suffix=".md")
+      printf '# %s\n\nOrigem: %s\n\n%s\n' "$u_title" "$spec_input" "$u_body" > "$remote_spec_tmp"
+      spec_file="$remote_spec_tmp"
+      spec_title="$u_title"
+      spec_slug="$u_slug"
+      spec_ext=".md"
+      rm -f "$raw_spec_tmp" "$json_spec_tmp"
+    else
+      if [[ ! -f "$spec_input" ]]; then
+        printf 'Error: Specification document not found: %s\n' "$spec_input" >&2
+        exit 1
+      fi
+      spec_file=$(cd "$(dirname "$spec_input")" && pwd -P)/$(basename "$spec_input")
 
-    # Extract spec title, slug, and format deterministically
-    local spec_info
-    spec_info=$(python3 - "$spec_file" <<'PYSPEC'
+      # Extract spec title, slug, and format deterministically
+      local spec_info
+      spec_info=$(python3 - "$spec_file" <<'PYSPEC'
 import sys, re, unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
@@ -3056,10 +3320,11 @@ slug = "_".join(res) or p.stem.lower()
 
 print(f"{title}\t{slug}\t{ext}")
 PYSPEC
-    )
-    spec_title=$(awk -F'\t' '{print $1}' <<< "$spec_info")
-    spec_slug=$(awk -F'\t' '{print $2}' <<< "$spec_info")
-    spec_ext=$(awk -F'\t' '{print $3}' <<< "$spec_info")
+      )
+      spec_title=$(awk -F'\t' '{print $1}' <<< "$spec_info")
+      spec_slug=$(awk -F'\t' '{print $2}' <<< "$spec_info")
+      spec_ext=$(awk -F'\t' '{print $3}' <<< "$spec_info")
+    fi
   fi
 
   # A lone positional that is not a remote URL nor an existing project is the
@@ -3173,6 +3438,7 @@ PYPARSE
 
   rollback_project_transaction() {
     local exit_code=$?
+    [[ -z "${remote_spec_tmp:-}" || ! -f "$remote_spec_tmp" ]] || rm -f "$remote_spec_tmp"
     if [[ "${PROJECT_TX_COMMITTED:-false}" != "true" && "${PROJECT_TX_ROLLED_BACK:-false}" != "true" ]]; then
       PROJECT_TX_ROLLED_BACK=true
       local did_rollback=false
@@ -3498,6 +3764,7 @@ EOF
   printf '   sprout feat "Sua primeira feature"\n'
   printf '   sprout fix "Seu primeiro bug fix"\n'
   printf '   sprout session status\n\n'
+  [[ -z "${remote_spec_tmp:-}" || ! -f "$remote_spec_tmp" ]] || rm -f "$remote_spec_tmp"
   PROJECT_TX_COMMITTED=true
   trap - INT TERM HUP EXIT
 }
@@ -3902,6 +4169,7 @@ issue=
 feature=
 slug=
 text_context=
+link_url=
 base_override=
 dest_override=
 agent_opt=
@@ -3913,7 +4181,7 @@ no_herdr=false
 
 while (($#)); do
   case "$1" in
-    --issue|--feature|--slug|--base|--dest|-a|--agent|--model|--effort|-m|--method|-c|--context|--context-file)
+    --issue|--feature|--slug|--base|--dest|-a|--agent|--model|--effort|-m|--method|-c|--context|--context-file|--link)
       (($# >= 2)) || usage
       option=$1
       value=$2
@@ -3922,6 +4190,13 @@ while (($#)); do
         --issue) [[ -z "$issue" ]] || usage; issue=$value ;;
         --feature) [[ -z "$feature" ]] || usage; feature=$value ;;
         --slug) [[ -z "$slug" ]] || usage; slug=$value ;;
+        --link)
+          [[ -z "$link_url" ]] || usage
+          link_url=$value
+          if [[ "$link_url" != http://* && "$link_url" != https://* ]]; then
+            link_url="https://$link_url"
+          fi
+          ;;
         -c|--context)
           [[ -z "$text_context" ]] || usage
           if [[ "$value" == "-" ]]; then
@@ -3931,8 +4206,11 @@ while (($#)); do
           fi
           ;;
         --context-file)
-          [[ -z "$text_context" ]] || usage
-          if [[ -f "$value" ]]; then
+          if [[ "$value" =~ ^https?:// ]]; then
+            [[ -z "$link_url" ]] || usage
+            link_url=$value
+          elif [[ -f "$value" ]]; then
+            [[ -z "$text_context" ]] || usage
             text_context=$(<"$value")
           else
             printf 'Context file not found: %s\n' "$value" >&2
@@ -3959,7 +4237,14 @@ while (($#)); do
     -*)
       printf 'Unknown argument: %s\n' "$1" >&2; usage ;;
     *)
-      if [[ -z "$text_context" && -z "$issue" ]]; then
+      if [[ "$1" =~ ^https?:// ]]; then
+        if [[ -z "$link_url" && -z "$issue" ]]; then
+          link_url=$1
+          shift
+        else
+          printf 'Unexpected argument: %s\n' "$1" >&2; usage
+        fi
+      elif [[ -z "$text_context" && -z "$issue" ]]; then
         text_context=$1
         shift
       else
@@ -4024,11 +4309,45 @@ issue_type=""
 priority=""
 desc_plain=""
 
-# 1. Process free-form text context if provided
-if [[ -n "$text_context" ]]; then
+# 1. Fetch and process remote link context if provided
+if [[ -n "$link_url" ]]; then
+  WORKTREE_TX_LINK_TMP=$(mktemp)
+  WORKTREE_TX_LINK_JSON=$(mktemp)
+  trap rollback_worktree_transaction INT TERM HUP EXIT
+
+  if ! fetch_and_parse_url "$link_url" "$WORKTREE_TX_LINK_TMP" "$WORKTREE_TX_LINK_JSON"; then
+    exit 1
+  fi
+
+  url_title=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('title',''))" "$WORKTREE_TX_LINK_JSON" 2>/dev/null || echo "")
+  url_slug=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('slug',''))" "$WORKTREE_TX_LINK_JSON" 2>/dev/null || echo "")
+  url_body=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('body',''))" "$WORKTREE_TX_LINK_JSON" 2>/dev/null || echo "")
+  url_desc=$(python3 -c "import json, sys; d=json.load(open(sys.argv[1])); print(d.get('description',''))" "$WORKTREE_TX_LINK_JSON" 2>/dev/null || echo "")
+
+  if [[ -z "$text_context" ]]; then
+    summary="$url_title"
+    feature=${feature:-$url_slug}
+    slug=${slug:-$url_slug}
+    desc_plain="Artigo de referência: $link_url
+
+$url_body"
+  else
+    summary="$text_context"
+    desc_plain="Objetivo: $summary
+
+Artigo de referência: $link_url
+
+$url_body"
+  fi
+fi
+
+# 2. Process free-form text context if provided (without link)
+if [[ -n "$text_context" && -z "$link_url" ]]; then
   summary=$(head -n 1 <<< "$text_context" | cut -c1-120)
   desc_plain="$text_context"
+fi
 
+if [[ -n "$summary" ]]; then
   if [[ -z "$feature" ]]; then
     feature=$(python3 - "$summary" <<'PYSLUG'
 import sys, unicodedata, re
@@ -4067,7 +4386,7 @@ PYSLUG
     *) issue_type="Task" ;;
   esac
 
-  priority=$(python3 - "$text_context" <<'PYPRIO'
+  priority=$(python3 - "${summary} ${desc_plain}" <<'PYPRIO'
 import sys, re
 text = sys.argv[1].lower()
 if re.search(r'\b(critical|urgent|urgente|emergenc|bloqueante|p0|grave|down|quebr|panic)\b', text):
@@ -4325,6 +4644,8 @@ trap rollback_worktree_transaction INT TERM HUP EXIT
 [[ -z "$github_repo" ]] || printf 'GitHub: %s\n' "$github_repo"
 if [[ -n "$issue" ]]; then
   printf 'Issue: %s — %s\n' "$issue" "$summary"
+elif [[ -n "$link_url" ]]; then
+  printf 'Link Task: %s — %s\n' "$summary" "$link_url"
 else
   printf 'Task: %s\n' "$summary"
 fi
@@ -4414,7 +4735,7 @@ with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
 PYNORM
   printf 'Saved issue context to %s/.sprout/issue.json and issue.md\n' "$target"
 elif [[ -n "$summary" ]]; then
-  python3 - "$target/.sprout" "$branch" "$summary" "${desc_plain:-$summary}" "${issue_type:-Task}" "${priority:-Medium}" <<'PYNORM_MANUAL'
+  python3 - "$target/.sprout" "$branch" "$summary" "${desc_plain:-$summary}" "${issue_type:-Task}" "${priority:-Medium}" "${link_url:-}" <<'PYNORM_MANUAL'
 import json, sys, os
 from pathlib import Path
 
@@ -4424,8 +4745,10 @@ summary = sys.argv[3]
 desc_text = sys.argv[4]
 issue_type = sys.argv[5]
 priority = sys.argv[6]
+link_url = sys.argv[7].strip() if len(sys.argv) > 7 else ""
 
 user_name = os.getenv("USER") or "developer"
+source = "url" if link_url else "manual"
 
 issue_model = {
     "key": branch,
@@ -4435,8 +4758,8 @@ issue_model = {
     "priority": priority,
     "assignee": user_name,
     "description": desc_text.strip(),
-    "source": "manual",
-    "url": ""
+    "source": source,
+    "url": link_url
 }
 
 with open(out_dir / "issue.json", "w", encoding="utf-8") as f:
@@ -4446,7 +4769,11 @@ with open(out_dir / "issue.md", "w", encoding="utf-8") as f:
     f.write(f"# [{issue_type}] {summary}\n\n")
     f.write(f"- **Tipo:** {issue_type}\n")
     f.write(f"- **Prioridade:** {priority}\n")
-    f.write(f"- **Origem:** Manual / Free-form Context\n")
+    if link_url:
+        f.write(f"- **Origem:** Link ({link_url})\n")
+        f.write(f"- **Link:** {link_url}\n")
+    else:
+        f.write(f"- **Origem:** Manual / Free-form Context\n")
     f.write(f"- **Branch:** `{branch}`\n")
     f.write(f"- **Responsável:** {user_name}\n\n")
     f.write(f"## Descrição / Objetivo\n\n{desc_text.strip()}\n")
@@ -4503,12 +4830,18 @@ EOF
           bmad)
             if [[ -n "$issue" ]]; then
               method_prompt="BMad, inicie no modo plan para planejar a tarefa/feature $workspace_label (${summary:-$feature}). A descrição e os detalhes do Jira estão salvos em .sprout/issue.json e .sprout/issue.md. Elabore o plano de implementação antes de realizar alterações no código e aguarde confirmação."
+            elif [[ -n "$link_url" ]]; then
+              method_prompt="BMad, inicie no modo plan para planejar a tarefa $workspace_label (${summary:-$feature}). O artigo/especificação de referência ($link_url) foi ingerido e está salvo em .sprout/issue.json e .sprout/issue.md. Elabore o plano de implementação antes de realizar alterações no código e aguarde confirmação."
             else
               method_prompt="BMad, inicie no modo plan para planejar a tarefa $workspace_label (${summary:-$feature}). O briefing e contexto inicial estão salvos em .sprout/issue.json e .sprout/issue.md. Elabore o plano de implementação antes de realizar alterações no código e aguarde confirmação."
             fi
             ;;
           scpe)
-            method_prompt="SCPE: inicie no modo plan para especificar a tarefa $workspace_label (${summary:-$feature}) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."
+            if [[ -n "$link_url" ]]; then
+              method_prompt="SCPE: inicie no modo plan para especificar a tarefa $workspace_label (${summary:-$feature}) a partir do artigo/especificação ingerido em .sprout/issue.json ($link_url). Inicie a especificação da feature de acordo com o método SCPE."
+            else
+              method_prompt="SCPE: inicie no modo plan para especificar a tarefa $workspace_label (${summary:-$feature}) a partir de .sprout/issue.json. Inicie a especificação da feature de acordo com o método SCPE."
+            fi
             ;;
           none|"")
             method_prompt=""
@@ -4532,5 +4865,7 @@ EOF
 fi
 
 printf '\nTo enter it: cd %q\n' "$target"
+[[ -z "${WORKTREE_TX_LINK_TMP:-}" || ! -f "$WORKTREE_TX_LINK_TMP" ]] || rm -f "$WORKTREE_TX_LINK_TMP"
+[[ -z "${WORKTREE_TX_LINK_JSON:-}" || ! -f "$WORKTREE_TX_LINK_JSON" ]] || rm -f "$WORKTREE_TX_LINK_JSON"
 WORKTREE_TX_COMMITTED=true
 trap - INT TERM HUP EXIT

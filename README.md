@@ -227,18 +227,45 @@ sprout prune --force
 | `--keep-remote` | Do not delete the matching branch on `origin`. |
 | `--no-herdr` | Do not close the associated Herdr workspace. |
 
+### Worktree Creation from Web Links & Articles
+
+Sprout can ingest remote documentation pages, architecture articles, or specifications directly to create a worktree in an existing repository:
+
+```bash
+# Ingest an article or documentation URL directly as positional argument
+sprout feat https://eng.uber.com/circuit-breaking-architecture/
+
+# Custom summary with explicit --link flag
+sprout feat "Implementar Circuit Breaker" --link https://martinfowler.com/articles/.../circuit-breaker.html
+
+# Read task context from a remote URL via --context-file
+sprout fix --context-file https://raw.githubusercontent.com/org/repo/main/docs/cache-bug.md
+```
+
+**How it works:**
+1. **Intelligent Ingestion:** Sprout fetches the remote page (`curl -sL`), detects whether it is HTML or Markdown, and extracts the title, metadata, and clean Markdown body using a zero-dependency HTML parser.
+2. **Deterministic Slug & Branch:** Automatically derives branch and feature names (e.g., `feat/circuit_breaking_architecture`).
+3. **Complexity & Agent Routing:** Passes the full extracted article content through the Semantic Complexity Engine to score complexity and select the calibrated model tier and reasoning effort.
+4. **Normalized Context:** Saves structured `.sprout/issue.json` (`source: "url"`, `url: "<URL>"`) and `.sprout/issue.md` containing the article markdown.
+5. **Autonomous Plan Mode:** Launches the agent (BMad / SCPE) in Herdr with the article pre-loaded in plan mode.
+6. **Atomic Rollback Guarantee:** If the URL returns a 404, network error, or user aborts, Sprout rolls back all state cleanly without leaving dirty branches or directories.
+
 ### Worktree Creation
 
 ```bash
 # Free-form text workflow (bypasses Jira; automatically derives branch slug & scores complexity)
 sprout feat "Adicionar exportação CSV no relatório de vendas"
 
+# Create worktree directly from an article URL
+sprout feat https://eng.uber.com/circuit-breaking-architecture/
+
 # Bug fix with urgent keyword -> automatically scores Frontier tier and High reasoning effort
 sprout fix "Deadlock no pool de conexões do postgres" --agent agy
 
-# Provide free-form context via flag or file
+# Provide free-form context via flag or file / remote URL
 sprout feat -c "Refatorar camada de autenticação para JWT stateless"
 sprout feat --context-file specs/auth.md
+sprout feat "Implementar Circuit Breaker" --link https://martinfowler.com/articles/.../circuit-breaker.html
 
 # Jira-backed workflow (fetches summary, description, and metadata from Jira Cloud)
 sprout fix --issue FT-123
@@ -281,10 +308,12 @@ Sprout operations are **strictly transactional**:
 | `sprout init` | — | Interactive initialization inside an existing base repository (Jira optional). |
 | `<type>` | — | Positional Conventional Commit type (`feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). |
 | `[TEXT]` | — | Optional positional free-form task description (bypasses Jira; automatically generates branch slug). |
+| `[URL]` | — | Optional positional URL to an article, spec, or doc to ingest as task context. |
+| `--link <URL>` | — | URL to an article, architecture doc, or spec to ingest directly as task context. |
 | `-p, --prompt <TEXT>`| — | Inline project idea or prompt (used with `sprout new` / `plant`). |
-| `-s, --spec <PATH>` | — | Path to vision, PRD, or spec document (`.md`, `.html`) to bootstrap project from. |
+| `-s, --spec <PATH_OR_URL>` | — | Path or URL to vision, PRD, or spec document (`.md`, `.html`) to bootstrap project from. |
 | `--context <TEXT>`| `-c` | Free-form task context (use `-` to read from stdin). |
-| `--context-file <FILE>`| — | Read task context from a markdown or text file. |
+| `--context-file <FILE_OR_URL>`| — | Read task context from a markdown/text file or remote URL. |
 | `--issue <KEY>` | — | Issue key (e.g. `FT-123`). Fetches details, derives branch slug, and creates `.sprout/issue.json`. |
 | `--agent <NAME>` | `-a` | Agent runtime to start in Herdr (`auto`, `claude`, `agy`, `codex`, `gemini`). Default: `auto` (Smart Router). |
 | `--model <MODEL>`| — | Explicit model override (e.g. `opus`, `sonnet`, `gemini-4-argon`, `gemini-3.8-flash`, `gpt-6-luna`). Defaults to task-type tiering. |
