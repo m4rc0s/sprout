@@ -83,6 +83,7 @@ Options:
   TARGET               Worktree path, feature/directory name, or branch to prune (defaults to the
                         current worktree; cannot target the base repository checkout)
   -y, --yes            Skip the confirmation prompt
+  -n, --dry-run        Simulate the prune without removing worktree, branch, or workspace
   --force              Remove the worktree despite uncommitted or unpushed changes, and force-delete
                         the local branch even if it isn't fully merged
   --keep-branch        Do not delete the local Git branch
@@ -3990,12 +3991,50 @@ sync_with_main_subcommand() {
   printf '✨ Branch %s is now current with origin/%s.\n\n' "$cur_branch" "$base_branch"
 }
 
+show_available_worktrees() {
+  local root_repo="$1"
+  python3 - "$root_repo" <<'PYSHOW_WTS'
+import subprocess, sys
+from pathlib import Path
+
+repo = sys.argv[1]
+try:
+    out = subprocess.check_output(["git", "-C", repo, "worktree", "list", "--porcelain"], text=True)
+except Exception:
+    sys.exit(0)
+
+entries = []
+cur = {}
+for line in out.splitlines():
+    if line.startswith("worktree "):
+        if cur: entries.append(cur)
+        cur = {"path": line.split(" ", 1)[1]}
+    elif line.startswith("branch "):
+        cur["branch"] = line.split(" ", 1)[1].replace("refs/heads/", "")
+if cur: entries.append(cur)
+
+repo_resolved = Path(repo).resolve()
+wts = [e for e in entries if Path(e.get("path","")).resolve() != repo_resolved]
+
+if not wts:
+    sys.stderr.write("   (Nenhuma outra worktree ativa encontrada neste repositório)\n\n")
+else:
+    sys.stderr.write("Worktrees ativas disponíveis para limpeza:\n")
+    for w in wts:
+        p = Path(w["path"])
+        br = w.get("branch", "detached")
+        sys.stderr.write(f"  • {p.name:<24} [branch: {br}] -> {p}\n")
+    sys.stderr.write("\n")
+PYSHOW_WTS
+}
+
 prune_worktree_subcommand() {
-  local target_input="" do_yes=false do_force=false keep_branch=false keep_remote=false no_herdr=false
+  local target_input="" do_yes=false do_force=false keep_branch=false keep_remote=false no_herdr=false do_dry_run=false
 
   while (($#)); do
     case "$1" in
       -y|--yes) do_yes=true; shift ;;
+      -n|--dry-run) do_dry_run=true; shift ;;
       --force) do_force=true; shift ;;
       --keep-branch) keep_branch=true; shift ;;
       --keep-remote) keep_remote=true; shift ;;
@@ -4061,6 +4100,10 @@ PYFIND_WT
     fi
     if [[ -z "$target_dir" || ! -d "$target_dir" ]]; then
       printf 'Error: could not find a worktree matching: %s\n' "$target_input" >&2
+      local search_repo="${cur_root:-${BASE_REPO:-}}"
+      if [[ -n "$search_repo" ]]; then
+        show_available_worktrees "$search_repo"
+      fi
       exit 1
     fi
   else
@@ -4082,13 +4125,19 @@ PYFIND_WT
 
   if [[ "$target_dir" == "$repo" ]]; then
     printf 'Error: refusing to prune the base repository checkout: %s\n' "$repo" >&2
+    printf 'Para podar uma worktree, informe o alvo: sprout prune <TARGET>\n\n' >&2
+    show_available_worktrees "$repo"
     exit 1
   fi
 
   if ! git -C "$repo" worktree list --porcelain | grep -Fq "worktree $target_dir"; then
     printf 'Error: %s is not a worktree of %s.\n' "$target_dir" "$repo" >&2
+    show_available_worktrees "$repo"
     exit 1
   fi
+
+  local target_name
+  target_name=$(basename "$target_dir")
 
   local branch
   branch=$(git -C "$target_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
@@ -4119,31 +4168,28 @@ PYFIND_WT
     fi
   fi
 
-  if [[ "$do_force" != "true" ]]; then
-    if [[ "$dirty" == "true" ]]; then
-      printf 'Error: %s has uncommitted changes. Commit/stash them or re-run with --force.\n' "$target_dir" >&2
-      exit 1
-    fi
-    if [[ "${unpushed:-0}" -gt 0 ]]; then
-      printf 'Error: branch %s has %s commit(s) not on origin. Push them or re-run with --force to discard.\n' "$branch" "$unpushed" >&2
-      exit 1
-    fi
-  fi
-
   local remote_exists=false
   if [[ -n "$branch" ]] && git -C "$repo" ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
     remote_exists=true
   fi
 
   # Locate the Herdr workspace backing this worktree by matching pane/agent cwd,
-  # the same approach used by check-review's auto-spawn lookup.
-  local ws_id=""
+  # and resolve workspace label if available.
+  local ws_info="" ws_id="" ws_label=""
   if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1 && herdr status client >/dev/null 2>&1; then
-    ws_id=$(python3 - "$target_dir" <<'PYFIND_WS'
+    ws_info=$(python3 - "$target_dir" <<'PYFIND_WS'
 import json, subprocess, sys
 from pathlib import Path
 
 target_root = Path(sys.argv[1]).resolve()
+ws_id = ""
+ws_label = ""
+
+try:
+    ws_out = subprocess.check_output(["herdr", "workspace", "list"], stderr=subprocess.DEVNULL)
+    ws_map = {w.get("workspace_id"): w.get("label", "") for w in (json.loads(ws_out).get("result") or {}).get("workspaces", []) if w.get("workspace_id")}
+except Exception:
+    ws_map = {}
 
 try:
     out = subprocess.check_output(["herdr", "agent", "list"], stderr=subprocess.DEVNULL)
@@ -4151,43 +4197,89 @@ try:
         for key in ("cwd", "foreground_cwd"):
             p = ag.get(key, "")
             if p and Path(p).resolve() == target_root:
-                print(ag.get("workspace_id", ""))
-                sys.exit(0)
+                ws_id = ag.get("workspace_id", "")
+                break
+        if ws_id:
+            break
 except Exception:
     pass
 
-try:
-    out = subprocess.check_output(["herdr", "pane", "list"], stderr=subprocess.DEVNULL)
-    for p in (json.loads(out).get("result") or {}).get("panes") or []:
-        for key in ("cwd", "foreground_cwd"):
-            v = p.get(key, "")
-            if v and Path(v).resolve() == target_root:
-                print(p.get("workspace_id", ""))
-                sys.exit(0)
-except Exception:
-    pass
+if not ws_id:
+    try:
+        out = subprocess.check_output(["herdr", "pane", "list"], stderr=subprocess.DEVNULL)
+        for p in (json.loads(out).get("result") or {}).get("panes") or []:
+            for key in ("cwd", "foreground_cwd"):
+                v = p.get(key, "")
+                if v and Path(v).resolve() == target_root:
+                    ws_id = p.get("workspace_id", "")
+                    break
+            if ws_id:
+                break
+    except Exception:
+        pass
+
+if ws_id:
+    ws_label = ws_map.get(ws_id, "")
+    print(f"{ws_id}\t{ws_label}")
 PYFIND_WS
     ) || true
+    if [[ -n "$ws_info" ]]; then
+      ws_id=$(awk -F'\t' '{print $1}' <<< "$ws_info")
+      ws_label=$(awk -F'\t' '{print $2}' <<< "$ws_info")
+    fi
   fi
 
-  printf '\n🪓 [Sprout Prune]\n'
-  printf '   Worktree: %s\n' "$target_dir"
-  [[ -z "$branch" ]] || printf '   Branch:   %s\n' "$branch"
-  [[ -z "$ws_id" ]] || printf '   Herdr:    workspace %s will be closed\n' "$ws_id"
-  printf '   Actions:\n'
-  printf '     - remove worktree\n'
+  printf '\n🪓 [Sprout Prune] Alvo identificado para limpeza:\n'
+  printf '   Worktree:         %s\n' "$target_dir"
+  printf '   Nome do Alvo:     %s\n' "$target_name"
+  [[ -z "$branch" ]] || printf '   Branch Local:     %s\n' "$branch"
+  printf '   Repositório Base: %s\n' "$repo"
+  if [[ -n "$ws_id" ]]; then
+    if [[ -n "$ws_label" ]]; then
+      printf '   Workspace Herdr:  %s ("%s") será fechado\n' "$ws_id" "$ws_label"
+    else
+      printf '   Workspace Herdr:  %s será fechado\n' "$ws_id"
+    fi
+  fi
+  printf '\n   Ações planejadas:\n'
+  printf '     • Remover worktree:          %s\n' "$target_dir"
   if [[ "$keep_branch" != "true" && -n "$branch" ]]; then
-    printf '     - delete local branch %s\n' "$branch"
+    printf '     • Excluir branch local:      %s\n' "$branch"
   fi
   if [[ "$keep_remote" != "true" && "$remote_exists" == "true" ]]; then
-    printf '     - delete origin/%s\n' "$branch"
+    printf '     • Excluir branch remota:     origin/%s\n' "$branch"
+  fi
+  if [[ -n "$ws_id" ]]; then
+    printf '     • Fechar workspace no Herdr: %s\n' "$ws_id"
+  fi
+
+  if [[ "$do_dry_run" == "true" ]]; then
+    printf '\n🔍 [Dry Run] Modo de simulação ativado. Nenhuma alteração foi realizada.\n\n'
+    return 0
+  fi
+
+  if [[ "$do_force" != "true" ]]; then
+    if [[ "$dirty" == "true" ]]; then
+      printf '\n❌ Erro: A worktree "%s" possui alterações não commitadas.\n' "$target_name" >&2
+      printf '   Faça commit/stash das alterações ou rode com --force para descartá-las:\n' >&2
+      printf '   sprout prune %s --force\n\n' "$target_name" >&2
+      exit 1
+    fi
+    if [[ "${unpushed:-0}" -gt 0 ]]; then
+      printf '\n❌ Erro: A branch "%s" possui %s commit(s) não enviados ao origin.\n' "$branch" "$unpushed" >&2
+      printf '   Envie os commits com git push ou rode com --force para descartar a branch:\n' >&2
+      printf '   sprout prune %s --force\n\n' "$target_name" >&2
+      exit 1
+    fi
   fi
 
   if [[ "$do_yes" != "true" ]]; then
     if [[ -t 0 ]]; then
       local reply
-      read -r -p $'\nProceed? [y/N] ' reply
-      [[ "$reply" =~ ^[Yy]$ ]] || { printf 'Aborted.\n' >&2; exit 1; }
+      local prompt_branch="${branch:+ (branch: $branch)}"
+      printf '\n'
+      read -r -p "⚠️  Tem certeza de que deseja podar a worktree '$target_name'$prompt_branch? [s/N]: " reply
+      [[ "$reply" =~ ^[SsYy]$ ]] || { printf 'Operação abortada pelo usuário.\n' >&2; exit 1; }
     else
       printf 'Error: refusing to prune without confirmation in a non-interactive shell. Re-run with --yes.\n' >&2
       exit 1
@@ -4195,15 +4287,15 @@ PYFIND_WS
   fi
 
   if [[ -n "$ws_id" ]]; then
-    printf '\nClosing Herdr workspace %s...\n' "$ws_id"
+    printf '\nFechando workspace do Herdr %s...\n' "$ws_id"
     herdr workspace close "$ws_id" >/dev/null 2>&1 || printf 'Warning: could not close Herdr workspace %s.\n' "$ws_id" >&2
   fi
 
   if [[ -n "$cur_root" && "$cur_root" == "$target_dir" ]]; then
-    printf '\nNote: your shell is inside the worktree being removed — after this finishes, run: cd %q\n' "$repo"
+    printf '\nNota: seu terminal está dentro da worktree que será removida — em seguida execute: cd %q\n' "$repo"
   fi
 
-  printf '\nRemoving worktree %s...\n' "$target_dir"
+  printf '\nRemovendo worktree %s...\n' "$target_dir"
   if [[ "$do_force" == "true" ]]; then
     git -C "$repo" worktree remove --force "$target_dir"
   else
@@ -4212,16 +4304,16 @@ PYFIND_WS
   git -C "$repo" worktree prune >/dev/null 2>&1 || true
 
   if [[ "$keep_branch" != "true" && -n "$branch" ]]; then
-    printf 'Deleting local branch %s...\n' "$branch"
+    printf 'Excluindo branch local %s...\n' "$branch"
     git -C "$repo" branch -D "$branch" >/dev/null 2>&1 || printf 'Warning: could not delete local branch %s.\n' "$branch" >&2
   fi
 
   if [[ "$keep_remote" != "true" && "$remote_exists" == "true" ]]; then
-    printf 'Deleting origin/%s...\n' "$branch"
+    printf 'Excluindo branch remota origin/%s...\n' "$branch"
     git -C "$repo" push origin --delete "$branch" >/dev/null 2>&1 || printf 'Warning: could not delete origin/%s.\n' "$branch" >&2
   fi
 
-  printf '\n✓ Pruned %s.\n\n' "$target_dir"
+  printf '\n✓ Worktree %s (branch: %s) podada e limpa com sucesso.\n\n' "$target_name" "${branch:-detached}"
 }
 
 if [[ "${1:-}" == "new" ]]; then

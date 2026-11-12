@@ -216,18 +216,24 @@ sprout prune --keep-remote
 
 # Discard uncommitted or unpushed work instead of being blocked
 sprout prune --force
+
+# Simulate without deleting anything (dry-run)
+sprout prune --dry-run
 ```
 
 **What it does:**
-1. Refuses to run on the base repository checkout, and refuses to proceed if the worktree has uncommitted changes or commits that were never pushed — unless `--force` is passed.
-2. Locates the Herdr workspace backing the worktree (by matching pane/agent `cwd`) and closes it.
-3. Removes the Git worktree (`git worktree remove`) and prunes stale worktree metadata.
-4. Deletes the local branch and, if it exists on `origin`, the remote branch too.
+1. Identifies the target worktree and prominently displays its metadata (path, target name, local branch, base repository, Herdr workspace) and planned actions.
+2. Refuses to run on the base repository checkout directly, listing all active worktrees available to prune.
+3. Refuses to proceed if the worktree has uncommitted changes or unpushed commits — unless `--force` is passed.
+4. Locates the Herdr workspace backing the worktree (by matching pane/agent `cwd`) and closes it.
+5. Removes the Git worktree (`git worktree remove`) and prunes stale worktree metadata.
+6. Deletes the local branch and, if it exists on `origin`, the remote branch too.
 
 | Option | Description |
 | :--- | :--- |
 | `TARGET` | Worktree path, feature/directory name, or branch to prune (defaults to the current worktree). |
 | `-y, --yes` | Skip the confirmation prompt. |
+| `-n, --dry-run` | Simulate the prune and display targeted worktree, branch, and actions without removing anything. |
 | `--force` | Remove the worktree despite uncommitted/unpushed changes, and force-delete the branch. |
 | `--keep-branch` | Do not delete the local Git branch. |
 | `--keep-remote` | Do not delete the matching branch on `origin`. |
