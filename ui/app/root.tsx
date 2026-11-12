@@ -1,10 +1,10 @@
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from "react-router";
-import { Theme } from "@astryxdesign/core/theme";
-import { neutralTheme } from "@astryxdesign/theme-neutral/built";
-// A ordem importa: reset, componentes e tema (camadas do Astryx).
+// Ordem das camadas do Astryx: reset, componentes e, por último, os temas (módulo gerado pelo CLI).
 import "@astryxdesign/core/reset.css";
 import "@astryxdesign/core/astryx.css";
-import "@astryxdesign/theme-neutral/theme.css";
+import "../astryx-themes";
+import "~/shared/theme/sprout-shell.css";
+import { ThemeSettingsProvider } from "~/shared/theme/theme-settings";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   return (
@@ -26,11 +26,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function Root() {
-  // Tema neutral do Astryx como veio; o modo segue o sistema.
   return (
-    <Theme theme={neutralTheme}>
+    <ThemeSettingsProvider>
       <Outlet />
-    </Theme>
+    </ThemeSettingsProvider>
   );
 }
 

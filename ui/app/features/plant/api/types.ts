@@ -38,3 +38,10 @@ export interface SproutApi {
   plant(request: PlantRequest, signal?: AbortSignal): AsyncIterable<PlantEvent>;
   terminal(paneId: string): TerminalTransport;
 }
+
+export type {
+  AgentSession,
+  Workspace,
+  Project,
+  RecentSession,
+} from "./workspace-data";

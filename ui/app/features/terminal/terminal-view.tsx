@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import type { ITheme, Terminal } from "@xterm/xterm";
 import type { TerminalTransport } from "~/features/plant/api/types";
 import { resolveCssColor } from "~/shared/lib/css-color";
 import "@xterm/xterm/css/xterm.css";
@@ -10,14 +11,35 @@ interface TerminalViewProps {
   label?: string;
   /** Chamado quando o usuário usa Ctrl+Shift+Espaço para sair do terminal (sem encaminhar a tecla ao agente). */
   onExit?: () => void;
+  /** Muda quando o tema ou o modo mudam; o terminal relê as cores dos tokens. */
+  themeKey?: string;
+}
+
+/** Cores do terminal a partir dos tokens do Astryx, resolvidas no escopo do próprio terminal. */
+function terminalTheme(scope: Element): ITheme {
+  const color = (token: string) => resolveCssColor(token, scope);
+  return {
+    background: color("--color-background-muted"),
+    foreground: color("--color-text-primary"),
+    cursor: color("--color-text-primary"),
+    black: color("--color-text-gray"),
+    red: color("--color-text-red"),
+    green: color("--color-text-green"),
+    yellow: color("--color-text-yellow"),
+    blue: color("--color-text-blue"),
+    magenta: color("--color-text-purple"),
+    cyan: color("--color-text-cyan"),
+    white: color("--color-text-primary"),
+  };
 }
 
 /**
  * Terminal embutido (xterm). Mostra a saída do agente e envia o que o usuário digita.
  * Carregado sob demanda (`React.lazy`) porque o xterm é pesado.
  */
-export default function TerminalView({ transport, label = "Terminal do agente", onExit }: TerminalViewProps) {
+export default function TerminalView({ transport, label = "Terminal do agente", onExit, themeKey }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -33,7 +55,6 @@ export default function TerminalView({ transport, label = "Terminal do agente", 
       ]);
       if (disposed) return;
 
-      const color = (token: string) => resolveCssColor(token, container);
       const terminal = new Terminal({
         convertEol: true,
         cursorBlink: true,
@@ -41,20 +62,9 @@ export default function TerminalView({ transport, label = "Terminal do agente", 
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: 13,
         // As cores vêm dos tokens do Astryx, então o terminal acompanha o tema e o modo.
-        theme: {
-          background: color("--color-background-muted"),
-          foreground: color("--color-text-primary"),
-          cursor: color("--color-text-primary"),
-          black: color("--color-text-gray"),
-          red: color("--color-text-red"),
-          green: color("--color-text-green"),
-          yellow: color("--color-text-yellow"),
-          blue: color("--color-text-blue"),
-          magenta: color("--color-text-purple"),
-          cyan: color("--color-text-cyan"),
-          white: color("--color-text-primary"),
-        },
+        theme: terminalTheme(container),
       });
+      terminalRef.current = terminal;
       // Sem uma saída, o terminal prenderia o teclado (Tab e Esc vão para o agente).
       terminal.attachCustomKeyEventHandler((event) => {
         if (event.type === "keydown" && event.ctrlKey && event.shiftKey && event.code === "Space") {
@@ -80,6 +90,7 @@ export default function TerminalView({ transport, label = "Terminal do agente", 
         input.dispose();
         unsubscribe();
         terminal.dispose();
+        terminalRef.current = null;
       };
     })();
 
@@ -88,6 +99,16 @@ export default function TerminalView({ transport, label = "Terminal do agente", 
       cleanup();
     };
   }, [transport, onExit]);
+
+  // Troca de tema ou modo: relê os tokens depois que o Astryx aplicou o novo tema.
+  useEffect(() => {
+    const container = containerRef.current;
+    if (themeKey === undefined || !container) return;
+    const frame = requestAnimationFrame(() => {
+      if (terminalRef.current) terminalRef.current.options.theme = terminalTheme(container);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [themeKey]);
 
   return <div ref={containerRef} role="region" aria-label={label} />;
 }

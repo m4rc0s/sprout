@@ -1,0 +1,180 @@
+/* =========================================================================
+   Sprout UI Shell & Scrollbar Styling
+   Inspirado no padrão de excelência de interface do FinOps BPO e Perplexity.ai.
+   Baseado fielmente nas medidas de docs/demo/bpo_workspace_shell_prototype.html.
+   Mantém integridade estética com os tokens de design do tema ativo (Y2K Dark).
+   ========================================================================= */
+
+/* ─── Scrollbar fina, discreta e minimalista ─── */
+.astryx-side-nav div[class*="scrollable"],
+.astryx-side-nav [data-scrollable],
+.sprout-sidebar-scroll,
+.sprout-scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-subtle, rgba(255, 255, 255, 0.16)) transparent;
+}
+
+.astryx-side-nav div[class*="scrollable"]::-webkit-scrollbar,
+.astryx-side-nav [data-scrollable]::-webkit-scrollbar,
+.sprout-sidebar-scroll::-webkit-scrollbar,
+.sprout-scroll-thin::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.astryx-side-nav div[class*="scrollable"]::-webkit-scrollbar-track,
+.astryx-side-nav [data-scrollable]::-webkit-scrollbar-track,
+.sprout-sidebar-scroll::-webkit-scrollbar-track,
+.sprout-scroll-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.astryx-side-nav div[class*="scrollable"]::-webkit-scrollbar-thumb,
+.astryx-side-nav [data-scrollable]::-webkit-scrollbar-thumb,
+.sprout-sidebar-scroll::-webkit-scrollbar-thumb,
+.sprout-scroll-thin::-webkit-scrollbar-thumb {
+  background: var(--color-border-subtle, rgba(255, 255, 255, 0.18));
+  border-radius: 9999px;
+  transition: background-color 0.2s ease;
+}
+
+.astryx-side-nav div[class*="scrollable"]::-webkit-scrollbar-thumb:hover,
+.astryx-side-nav [data-scrollable]::-webkit-scrollbar-thumb:hover,
+.sprout-sidebar-scroll::-webkit-scrollbar-thumb:hover,
+.sprout-scroll-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border, rgba(255, 255, 255, 0.38));
+}
+
+/* ─── Transição suave do recolhimento da barra lateral ─── */
+.astryx-side-nav {
+  transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  width: 260px !important;
+  min-width: 260px;
+}
+
+/* ─── 1. Cabeçalho da Sidebar (.sidebar-header do protótipo) ─── */
+.astryx-side-nav-heading {
+  padding: 14px 14px 12px 14px !important;
+  min-height: 52px;
+}
+
+.astryx-side-nav-heading > span,
+.astryx-side-nav-heading [class*="heading"] {
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.01em;
+}
+
+/* ─── 2. Botão "+ Novo" (.cta-container & .btn-new-chat do protótipo) ─── */
+.sprout-sidebar-cta {
+  padding: 0 12px 12px 12px;
+}
+
+.sprout-btn-new {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px !important;
+  min-height: 42px !important;
+  border-radius: 10px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  background-color: var(--color-background-muted, #1f242d) !important;
+  border: 1px solid var(--color-border, #2a313d) !important;
+  color: var(--color-text-primary, #f3f4f6) !important;
+  transition: all 0.15s ease-in-out;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.sprout-btn-new:hover {
+  background-color: var(--color-background-card, #262c37) !important;
+  border-color: var(--color-border-emphasized, #6b7280) !important;
+  color: var(--color-text-primary, #ffffff) !important;
+}
+
+.sprout-btn-new:active {
+  transform: translateY(1px);
+}
+
+.sprout-btn-new:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ─── 3. Espaçamento da área de rolagem e seções (.nav-section do protótipo) ─── */
+.astryx-side-nav div[class*="scrollable"],
+.astryx-side-nav [data-scrollable] {
+  padding: 0 10px !important;
+}
+
+.astryx-side-nav-section {
+  margin-bottom: 12px !important;
+}
+
+/* ─── 4. Títulos de seção (.section-title do protótipo) ─── */
+.astryx-side-nav-section [id$="-title"],
+.astryx-side-nav-section > div:first-child span {
+  font-size: 11px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.05em !important;
+  color: var(--color-text-secondary, #9ca3af) !important;
+  opacity: 0.85;
+  padding: 12px 8px 6px 8px !important;
+}
+
+/* ─── 5. Itens de Menu (.nav-item e .thread-item do protótipo) ─── */
+.astryx-side-nav-item {
+  min-height: 38px !important;
+  padding: 8px 12px !important;
+  border-radius: 8px !important;
+  margin-bottom: 3px !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  gap: 10px !important;
+  color: var(--color-text-secondary, #9ca3af) !important;
+  transition: all 0.15s ease-in-out !important;
+  box-sizing: border-box;
+}
+
+.astryx-side-nav-item:hover {
+  background-color: var(--color-background-muted, #1f242d) !important;
+  color: var(--color-text-primary, #f3f4f6) !important;
+}
+
+.astryx-side-nav-item[aria-current="page"],
+.astryx-side-nav-item[data-selected="true"],
+.astryx-side-nav-item[class*="selected"] {
+  background-color: var(--color-background-muted, #1f242d) !important;
+  color: var(--color-text-primary, #ffffff) !important;
+  font-weight: 600 !important;
+}
+
+/* Ícones dos itens */
+.astryx-side-nav-item svg,
+.astryx-side-nav-item i {
+  width: 16px !important;
+  height: 16px !important;
+  flex-shrink: 0;
+  stroke-width: 1.75;
+}
+
+/* Itens aninhados (workspaces dentro de projetos) */
+.astryx-side-nav-section [role="group"] .astryx-side-nav-item,
+.astryx-side-nav-item [role="group"] .astryx-side-nav-item {
+  min-height: 34px !important;
+  padding: 6px 12px !important;
+  font-size: 12.5px !important;
+}
+
+/* ─── 6. Rodapé do Menu Lateral (.sidebar-footer do protótipo) ─── */
+.sprout-sidebar-footer {
+  padding: 14px 12px 12px 12px;
+  border-top: 1px solid var(--color-border, #2a313d);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
