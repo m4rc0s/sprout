@@ -131,3 +131,31 @@ When invoked:
 3. It restarts the agent process cleanly with a pristine context window (~3k tokens).
 4. It submits an automatic warm-start prompt instructing the agent to resume from `.sprout/handoff.md`.
 
+---
+
+## Zero-Git Greenfield Projects & Transactional Lifecycle
+
+### Starting from Scratch with `sprout new`
+To start a new project from an arbitrary directory without an existing Git repo or remote:
+
+```bash
+# Greenfield project with discovery agent
+sprout new meu_app
+
+# Seeded with an inline idea / prompt
+sprout new meu_app -p "Dashboard de pagamentos em Next.js"
+
+# Seeded from a specification document
+sprout new meu_app -s specs/prd.md
+```
+
+### Transactional Rollback Protection
+All worktree and project creation routines operate under an atomic transaction boundary. If an operation is interrupted (`Ctrl+C` / `SIGINT`), terminated, or fails mid-flight:
+1. Any allocated Herdr workspace is cleanly closed.
+2. The Git worktree is removed (`git worktree remove --force` + `git worktree prune`).
+3. The created filesystem directory is cleaned up.
+4. The unmerged Git branch is deleted (`git branch -D`).
+5. Temporary Netrc/API files are purged.
+
+This guarantees that re-running the command immediately afterwards succeeds with zero stale state or directory/branch conflicts.
+

@@ -10,6 +10,7 @@ auth_file="$config_dir/auth.toml"
 usage() {
   cat >&2 <<'HELP'
 Usage:
+  sprout new <NAME_OR_PATH> [options]
   sprout plant [REPO_URL_OR_PATH] [DEST_DIR] [options]
   sprout plant [SPEC_DOC] [DEST_DIR] [options]
   sprout plant [REPO_URL_OR_PATH] --spec <SPEC_DOC> [options]
@@ -23,7 +24,8 @@ Usage:
   sprout <type> [TEXT | --context <TEXT>] [options]
   sprout <type> (--issue <ISSUE-KEY> | --feature <name>) [options]
 
-Tree Planting & Initialization:
+Project Creation & Initialization:
+  sprout new <NAME> [options]                  Create brand new project from scratch (zero Git pre-requisites)
   sprout plant [URL|PATH|SPEC] [DIR] [options] Plant base repo from Git URL, local path, or spec doc (.md/.html)
   sprout init                                  Interactive initialization inside an existing base repository
 
@@ -56,21 +58,22 @@ Options:
   TEXT                 Optional positional text describing the task/goal (bypasses Jira)
   -c, --context TEXT   Free-form task context (use '-' to read from stdin)
   --context-file FILE  Read task context from a markdown or text file
+  -p, --prompt TEXT    Inline project idea or prompt (for sprout new / plant)
   -s, --spec PATH      Path to vision, PRD, or spec document (.md, .html) to bootstrap project from
-  -b, --branch BRANCH  Branch to checkout (used with plant; defaults to default branch or #branch in URL)
+  -b, --branch BRANCH  Branch to checkout (used with new/plant; defaults to main or remote default)
   --dest PATH          Destination directory (defaults to repo name or derived project slug)
   --name NAME          Project display name (defaults to repository name or document title)
   -a, --agent NAME     Agent to launch in Herdr workspace (auto, claude, agy, codex). Default: auto (headroom-first router)
   --model MODEL        Explicit model override (e.g. opus, sonnet, gemini-4-argon, gemini-3.8-flash, gpt-6-luna)
   --effort LEVEL       Explicit reasoning effort override (high, medium, low)
   -m, --method NAME    Workflow/methodology template (bmad, scpe, none). Default: bmad
-  --no-agent           Create worktree and Herdr workspace without launching an agent
-  --no-herdr           Create worktree only without creating a Herdr workspace
+  --no-agent           Create worktree/project and Herdr workspace without launching an agent
+  --no-herdr           Create worktree/project only without creating a Herdr workspace
   --configure-jira     Prompt for Jira credentials and save them to $HOME/.sprout/auth.toml
   -h, --help           Show this help
 
-`sprout init` must be run inside the canonical base repository. It stores project name, GitHub repo,
-and defaults under shared Git metadata, and tracker credentials in $HOME/.sprout/auth.toml.
+`sprout new` creates a brand new project completely from scratch without needing a pre-existing Git repo.
+`sprout init` must be run inside an existing base repository to configure Sprout metadata.
 
 `sprout prune` options:
   TARGET               Worktree path, feature/directory name, or branch to prune (defaults to the
@@ -83,6 +86,11 @@ and defaults under shared Git metadata, and tracker credentials in $HOME/.sprout
   --no-herdr           Do not close the associated Herdr workspace
 
 Examples:
+  # Create a brand new project from scratch (zero Git pre-requisites):
+  sprout new meu_app
+  sprout new meu_app -p "Dashboard de pagamentos em Next.js"
+  sprout new meu_app -s specs/prd.md
+
   # Plant a brand new project from a specification document:
   sprout plant vision.md
   sprout plant specs/prd.html ~/workspace/meu_app
@@ -116,6 +124,82 @@ resolve_repository() {
   common_dir=$(git -C "$requested" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
   common_dir=$(cd "$common_dir" && pwd -P) || return 1
   printf '%s\n%s\n' "$(dirname "$common_dir")" "$common_dir"
+}
+
+WORKTREE_TX_COMMITTED=false
+WORKTREE_TX_ROLLED_BACK=false
+WORKTREE_TX_TARGET=""
+WORKTREE_TX_BRANCH=""
+WORKTREE_TX_REPO=""
+WORKTREE_TX_HERDR_WS=""
+WORKTREE_TX_NETRC=""
+WORKTREE_TX_RESPFILE=""
+
+rollback_worktree_transaction() {
+  local exit_code=$?
+  [[ -z "$WORKTREE_TX_NETRC" || ! -f "$WORKTREE_TX_NETRC" ]] || rm -f "$WORKTREE_TX_NETRC"
+  [[ -z "$WORKTREE_TX_RESPFILE" || ! -f "$WORKTREE_TX_RESPFILE" ]] || rm -f "$WORKTREE_TX_RESPFILE"
+
+  if [[ "${WORKTREE_TX_COMMITTED:-false}" != "true" && "${WORKTREE_TX_ROLLED_BACK:-false}" != "true" ]]; then
+    WORKTREE_TX_ROLLED_BACK=true
+    local did_rollback=false
+
+    # 1. Herdr workspace cleanup
+    if [[ -n "${WORKTREE_TX_HERDR_WS:-}" ]] && command -v herdr >/dev/null 2>&1; then
+      herdr workspace close "$WORKTREE_TX_HERDR_WS" >/dev/null 2>&1 || true
+      did_rollback=true
+    elif [[ -n "${WORKTREE_TX_TARGET:-}" ]] && command -v herdr >/dev/null 2>&1 && herdr status client >/dev/null 2>&1; then
+      local ws_id
+      ws_id=$(python3 - "$WORKTREE_TX_TARGET" <<'PYFIND_TX'
+import json, subprocess, sys
+from pathlib import Path
+target = Path(sys.argv[1]).resolve()
+try:
+    out = subprocess.check_output(["herdr", "workspace", "list"], stderr=subprocess.DEVNULL)
+    for ws in (json.loads(out).get("result") or {}).get("workspaces") or []:
+        if ws.get("cwd") and Path(ws.get("cwd")).resolve() == target:
+            print(ws.get("workspace_id", ""))
+            sys.exit(0)
+except Exception:
+    pass
+PYFIND_TX
+      ) 2>/dev/null || true
+      if [[ -n "$ws_id" ]]; then
+        herdr workspace close "$ws_id" >/dev/null 2>&1 || true
+        did_rollback=true
+      fi
+    fi
+
+    # 2. Git worktree cleanup
+    if [[ -n "${WORKTREE_TX_REPO:-}" && -n "${WORKTREE_TX_TARGET:-}" ]]; then
+      if git -C "$WORKTREE_TX_REPO" worktree list --porcelain 2>/dev/null | grep -Fq "worktree $WORKTREE_TX_TARGET"; then
+        git -C "$WORKTREE_TX_REPO" worktree remove --force "$WORKTREE_TX_TARGET" >/dev/null 2>&1 || true
+        git -C "$WORKTREE_TX_REPO" worktree prune >/dev/null 2>&1 || true
+        did_rollback=true
+      fi
+    fi
+
+    # 3. Directory cleanup
+    if [[ -n "${WORKTREE_TX_TARGET:-}" && -d "$WORKTREE_TX_TARGET" ]]; then
+      rm -rf "$WORKTREE_TX_TARGET" 2>/dev/null || true
+      did_rollback=true
+    fi
+
+    # 4. Branch cleanup
+    if [[ -n "${WORKTREE_TX_REPO:-}" && -n "${WORKTREE_TX_BRANCH:-}" ]]; then
+      if git -C "$WORKTREE_TX_REPO" show-ref --verify --quiet "refs/heads/$WORKTREE_TX_BRANCH"; then
+        git -C "$WORKTREE_TX_REPO" branch -D "$WORKTREE_TX_BRANCH" >/dev/null 2>&1 || true
+        did_rollback=true
+      fi
+    fi
+
+    if [[ "$did_rollback" == "true" ]]; then
+      printf '\n⚠️  [Sprout Transaction Rollback] A criação foi interrompida ou encontrou erro.\n' >&2
+      printf '   Diretório, branch (%s) e worktree foram limpos automaticamente para evitar conflitos.\n' "${WORKTREE_TX_BRANCH:-}" >&2
+      printf '   Você pode rodar novamente o comando com segurança.\n\n' >&2
+    fi
+  fi
+  exit "$exit_code"
 }
 
 evaluate_agent_routing() {
@@ -2547,7 +2631,7 @@ PYCONFIG
 init_project() {
   local current_root resolved canonical_root common_dir
   current_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
-    printf 'Run sprout init from inside the canonical base Git repository.\n' >&2
+    printf 'Not inside a Git repository.\nTo create a brand new project from scratch, use:\n   sprout new <project-name>\n\nOr run "git init" first to adopt this directory.\n' >&2
     exit 1
   }
   resolved=$(resolve_repository "$current_root") || { printf 'Could not resolve the Git repository metadata.\n' >&2; exit 1; }
@@ -2582,15 +2666,18 @@ github_repo = input("GitHub repository (owner/repo or URL): ").strip()
 default_agent = input("Default agent (auto, claude, agy, codex) [auto]: ").strip() or "auto"
 default_method = input("Default workflow/method (bmad, scpe, none) [bmad]: ").strip() or "bmad"
 
-jira_url = input("Jira base URL (for example https://company.atlassian.net): ").strip().rstrip("/")
-jira_email = input("Atlassian account email: ").strip()
-jira_token = getpass.getpass("Jira API token: ").strip()
+jira_url = input("Jira base URL (optional, press Enter to skip): ").strip().rstrip("/")
+jira_email = ""
+jira_token = ""
+if jira_url:
+    if not re.fullmatch(r"https?://[^/]+", jira_url):
+        raise SystemExit("Enter a valid Jira site URL.")
+    jira_email = input("Atlassian account email: ").strip()
+    jira_token = getpass.getpass("Jira API token: ").strip()
+    if "@" not in jira_email or not jira_token:
+        raise SystemExit("Jira email and API token are required when configuring Jira.")
 if not project_name or not github_repo:
     raise SystemExit("Project name and GitHub repository are required.")
-if not re.fullmatch(r"https?://[^/]+", jira_url):
-    raise SystemExit("Enter a valid Jira site URL.")
-if "@" not in jira_email or not jira_token:
-    raise SystemExit("Jira email and API token are required.")
 
 def write_private(path, content):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2613,16 +2700,20 @@ project_text = "[project]\n" + "\n".join((
     "method = " + json.dumps(default_method),
 )) + "\n"
 
-auth_text = "[jira]\n" + "\n".join((
-    "base_url = " + json.dumps(jira_url),
-    "email = " + json.dumps(jira_email),
-    "api_token = " + json.dumps(jira_token),
-)) + "\n"
-
 write_private(project_config, project_text)
-write_private(auth_config, auth_text)
 print(f"Project config saved to {project_config}")
-print(f"Jira credentials saved to {auth_config}")
+
+if jira_url and jira_email and jira_token:
+    auth_text = "[jira]\n" + "\n".join((
+        "base_url = " + json.dumps(jira_url),
+        "email = " + json.dumps(jira_email),
+        "api_token = " + json.dumps(jira_token),
+    )) + "\n"
+    write_private(auth_config, auth_text)
+    print(f"Jira credentials saved to {auth_config}")
+else:
+    print("Jira configuration skipped (can be configured later via sprout --configure-jira).")
+
 print(f"Base repository detected as {base_repo}; its path was not saved in either config.")
 PYINIT
 }
@@ -2645,6 +2736,111 @@ is_empty_project() {
   return 0
 }
 
+new_project_subcommand() {
+  local target_name=""
+  local prompt_input=""
+  local spec_input=""
+  local branch_override=""
+  local name_override=""
+  local agent_override="auto"
+  local method_override="bmad"
+  local no_herdr=false
+  local no_agent=false
+
+  while (($#)); do
+    case "$1" in
+      -p|--prompt|-c|--context)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        if [[ "$2" == "-" ]]; then prompt_input=$(cat); else prompt_input=$2; fi
+        shift 2 ;;
+      -s|--spec|--context-file)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        spec_input=$2; shift 2 ;;
+      -b|--branch)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        branch_override=$2; shift 2 ;;
+      --name)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        name_override=$2; shift 2 ;;
+      -a|--agent)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        agent_override=$2; shift 2 ;;
+      -m|--method)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        method_override=$2; shift 2 ;;
+      --no-herdr)
+        no_herdr=true; shift ;;
+      --no-agent)
+        no_agent=true; shift ;;
+      -h|--help)
+        cat <<'NEWHelp'
+Usage:
+  sprout new <NAME_OR_PATH> [options]
+
+Create a brand new project completely from scratch (zero Git pre-requisites).
+Initializes a clean Git repository, Sprout configuration, initial commit, and optional Herdr workspace.
+
+Options:
+  -p, --prompt TEXT    Inline project idea or prompt (saved to .sprout/spec.md)
+  -s, --spec PATH      Path to a specification document (.md, .html)
+  -b, --branch BRANCH  Initial Git branch name (default: main)
+  --name NAME          Project display name (defaults to directory name)
+  -a, --agent NAME     Default agent (auto, claude, agy, codex). Default: auto
+  -m, --method NAME    Default methodology (bmad, scpe, none). Default: bmad
+  --no-agent           Do not launch agent session in Herdr
+  --no-herdr           Do not create or focus workspace in Herdr
+  -h, --help           Show this help
+
+Examples:
+  # Empty greenfield project:
+  sprout new meu_app
+
+  # From an inline idea / prompt:
+  sprout new meu_app -p "Dashboard de pagamentos em Next.js com Prisma"
+
+  # From an existing PRD or specification document:
+  sprout new meu_app -s specs/prd.md
+
+  # Initialize without launching an agent:
+  sprout new meu_app --no-agent
+NEWHelp
+        exit 0
+        ;;
+      -*)
+        printf 'Unknown option for sprout new: %s\n' "$1" >&2; exit 2 ;;
+      *)
+        if [[ -z "$target_name" ]]; then
+          target_name=$1
+        else
+          printf 'Unexpected argument for sprout new: %s\n' "$1" >&2; exit 2
+        fi
+        shift ;;
+    esac
+  done
+
+  if [[ -z "$target_name" ]]; then
+    printf 'Error: Project name or destination path is required.\nUsage: sprout new <NAME_OR_PATH> [options]\n' >&2
+    exit 2
+  fi
+
+  if [[ -n "$prompt_input" && -n "$spec_input" ]]; then
+    printf 'Error: Use either --prompt or --spec, not both.\n' >&2
+    exit 2
+  fi
+
+  local args=(--dest "$target_name")
+  [[ -z "$prompt_input" ]] || args+=(-p "$prompt_input")
+  [[ -z "$spec_input" ]] || args+=(-s "$spec_input")
+  [[ -z "$branch_override" ]] || args+=(-b "$branch_override")
+  [[ -z "$name_override" ]] || args+=(--name "$name_override")
+  [[ -z "$agent_override" ]] || args+=(-a "$agent_override")
+  [[ -z "$method_override" ]] || args+=(-m "$method_override")
+  [[ "$no_herdr" != "true" ]] || args+=(--no-herdr)
+  [[ "$no_agent" != "true" ]] || args+=(--no-agent)
+
+  SPROUT_ACTION_VERB="new" SPROUT_ACTION_LABEL="New" plant_repository "${args[@]}"
+}
+
 plant_repository() {
   local source_input=""
   local dest_input=""
@@ -2660,13 +2856,16 @@ plant_repository() {
 
   while (($#)); do
     case "$1" in
-      -s|--spec)
+      -s|--spec|--context-file)
         (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
         spec_input=$2; shift 2 ;;
-      -p|--prompt)
+      -p|--prompt|-c|--context)
         (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
         if [[ "$2" == "-" ]]; then prompt_input=$(cat); else prompt_input=$2; fi
         shift 2 ;;
+      --repo)
+        (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
+        source_input=$2; shift 2 ;;
       -b|--branch)
         (($# >= 2)) || { printf 'Missing value for %s\n' "$1" >&2; exit 2; }
         branch_override=$2; shift 2 ;;
@@ -2940,7 +3139,7 @@ PYPARSE
     else
       repo_name="$(basename "$dest_input")"
     fi
-    printf 'Note: empty project detected - planting as greenfield.\n'
+    [[ "${SPROUT_ACTION_LABEL:-}" == "New" ]] || printf 'Note: empty project detected - planting as greenfield.\n'
   else
     printf 'Error: Provide a repository URL, Git path, or specification document (.md, .html).\nRun sprout plant --help for usage.\n' >&2
     exit 1
@@ -2962,7 +3161,68 @@ PYPARSE
     target_dir="$(pwd -P)/$repo_name"
   fi
 
-  printf '\n🌱 [Sprout Plant] Planting project tree...\n'
+  local PROJECT_TX_COMMITTED=false
+  local PROJECT_TX_ROLLED_BACK=false
+  local PROJECT_TX_TARGET="$target_dir"
+  local PROJECT_TX_HERDR_WS=""
+  local PROJECT_TX_CREATED_DIR=false
+
+  if [[ ! -e "$target_dir" ]]; then
+    PROJECT_TX_CREATED_DIR=true
+  fi
+
+  rollback_project_transaction() {
+    local exit_code=$?
+    if [[ "${PROJECT_TX_COMMITTED:-false}" != "true" && "${PROJECT_TX_ROLLED_BACK:-false}" != "true" ]]; then
+      PROJECT_TX_ROLLED_BACK=true
+      local did_rollback=false
+
+      if [[ -n "${PROJECT_TX_HERDR_WS:-}" ]] && command -v herdr >/dev/null 2>&1; then
+        herdr workspace close "$PROJECT_TX_HERDR_WS" >/dev/null 2>&1 || true
+        did_rollback=true
+      elif [[ -n "${PROJECT_TX_TARGET:-}" ]] && command -v herdr >/dev/null 2>&1 && herdr status client >/dev/null 2>&1; then
+        local ws_id
+        ws_id=$(python3 - "$PROJECT_TX_TARGET" <<'PYFIND_PWS'
+import json, subprocess, sys
+from pathlib import Path
+target = Path(sys.argv[1]).resolve()
+try:
+    out = subprocess.check_output(["herdr", "workspace", "list"], stderr=subprocess.DEVNULL)
+    for ws in (json.loads(out).get("result") or {}).get("workspaces") or []:
+        if ws.get("cwd") and Path(ws.get("cwd")).resolve() == target:
+            print(ws.get("workspace_id", ""))
+            sys.exit(0)
+except Exception:
+    pass
+PYFIND_PWS
+        ) 2>/dev/null || true
+        if [[ -n "$ws_id" ]]; then
+          herdr workspace close "$ws_id" >/dev/null 2>&1 || true
+          did_rollback=true
+        fi
+      fi
+
+      if [[ "${PROJECT_TX_CREATED_DIR:-false}" == "true" && -d "$PROJECT_TX_TARGET" ]]; then
+        rm -rf "$PROJECT_TX_TARGET" 2>/dev/null || true
+        did_rollback=true
+      fi
+
+      if [[ "$did_rollback" == "true" ]]; then
+        printf '\n⚠️  [Sprout Transaction Rollback] Criação do projeto interrompida ou falhou.\n' >&2
+        printf '   Diretório e recursos criados foram limpos automaticamente para evitar conflitos.\n' >&2
+        printf '   Você pode rodar novamente o comando com segurança.\n\n' >&2
+      fi
+    fi
+    exit "$exit_code"
+  }
+  trap rollback_project_transaction INT TERM HUP EXIT
+
+  local action_label="${SPROUT_ACTION_LABEL:-Plant}"
+  if [[ "$action_label" == "New" ]]; then
+    printf '\n🌱 [Sprout New] Creating project tree...\n'
+  else
+    printf '\n🌱 [Sprout Plant] Planting project tree...\n'
+  fi
   if [[ -n "$spec_file" ]]; then
     printf '   Specification: %s\n' "$spec_file"
   fi
@@ -3169,6 +3429,7 @@ EOF
       local ws_create_json pane_id safe_agent_name
       ws_create_json=$(herdr workspace create --cwd "$target_dir" --label "$project_name" --focus 2>/dev/null) || true
       pane_id=$(jq -r '.result.root_pane.pane_id // empty' <<< "$ws_create_json" 2>/dev/null || true)
+      PROJECT_TX_HERDR_WS=$(jq -r '.result.workspace.workspace_id // .result.root_pane.workspace_id // empty' <<< "$ws_create_json" 2>/dev/null || true)
 
       if [[ "$no_agent" != "true" && -n "$pane_id" ]]; then
         safe_agent_name=$(printf 'agent-%s' "$project_name" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
@@ -3217,7 +3478,11 @@ EOF
     fi
   fi
 
-  printf '\n✨ Tree planted successfully! (A árvore base foi plantada e enraizada)\n'
+  if [[ "${SPROUT_ACTION_LABEL:-}" == "New" ]]; then
+    printf '\n✨ Project created successfully! (Projeto criado e enraizado)\n'
+  else
+    printf '\n✨ Tree planted successfully! (A árvore base foi plantada e enraizada)\n'
+  fi
   printf '   Location:      %s\n' "$target_dir"
   printf '   Active Branch: %s\n' "$active_branch"
   printf '   Default Agent: %s\n' "$agent_override"
@@ -3233,6 +3498,8 @@ EOF
   printf '   sprout feat "Sua primeira feature"\n'
   printf '   sprout fix "Seu primeiro bug fix"\n'
   printf '   sprout session status\n\n'
+  PROJECT_TX_COMMITTED=true
+  trap - INT TERM HUP EXIT
 }
 
 sync_with_main_subcommand() {
@@ -3253,6 +3520,37 @@ sync_with_main_subcommand() {
   base_branch="main"
   if git -C "$target_root" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$target_root" show-ref --verify --quiet refs/remotes/origin/main; then
     base_branch="master"
+  fi
+
+  local has_origin=false
+  if git -C "$target_root" remote 2>/dev/null | grep -q "^origin$"; then
+    has_origin=true
+  fi
+
+  if [[ "$has_origin" != "true" ]]; then
+    printf '\n🔄 [Sprout Sync] No remote "origin" found. Checking local %s...\n' "$base_branch"
+    if [[ "$cur_branch" == "$base_branch" ]]; then
+      printf '✓ Current branch is %s (up-to-date).\n' "$base_branch"
+      return 0
+    fi
+    local did_stash=false
+    if ! git -C "$target_root" diff --quiet || ! git -C "$target_root" diff --cached --quiet; then
+      printf '⚠️  Working tree has uncommitted changes. Stashing before rebase...\n'
+      git -C "$target_root" stash push -m "sprout-sync-autostash" >/dev/null 2>&1
+      did_stash=true
+    fi
+    printf 'Rebasing %s on top of local %s...\n' "$cur_branch" "$base_branch"
+    if git -C "$target_root" rebase "$base_branch"; then
+      [[ "$did_stash" != "true" ]] || git -C "$target_root" stash pop >/dev/null 2>&1 || true
+      printf '✓ Successfully rebased %s onto local %s.\n\n' "$cur_branch" "$base_branch"
+      return 0
+    else
+      printf '⚠️  Rebase encountered conflicts. Please resolve conflicts or run: git rebase --abort\n' >&2
+      if [[ "$did_stash" == "true" ]]; then
+        printf 'Note: uncommitted changes were stashed (git stash pop).\n' >&2
+      fi
+      return 1
+    fi
   fi
 
   printf '\n🔄 [Sprout Sync] Synchronizing %s with origin/%s...\n' "$cur_branch" "$base_branch"
@@ -3405,12 +3703,23 @@ PYFIND_WT
     dirty=true
   fi
 
+  local base_branch="main"
+  if git -C "$repo" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main; then
+    base_branch="master"
+  elif ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main && git -C "$repo" show-ref --verify --quiet refs/heads/master && ! git -C "$repo" show-ref --verify --quiet refs/heads/main; then
+    base_branch="master"
+  fi
+
   local unpushed=0
   if [[ -n "$branch" ]]; then
     if git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
       unpushed=$(git -C "$repo" rev-list --count "origin/$branch..$branch" 2>/dev/null || echo 0)
+    elif git -C "$repo" remote 2>/dev/null | grep -q "^origin$" && git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+      unpushed=$(git -C "$repo" rev-list --count "origin/$base_branch..$branch" 2>/dev/null || echo 0)
+    elif git -C "$repo" show-ref --verify --quiet "refs/heads/$base_branch"; then
+      unpushed=$(git -C "$repo" rev-list --count "$base_branch..$branch" 2>/dev/null || echo 0)
     else
-      unpushed=$(git -C "$repo" rev-list --count "$branch" 2>/dev/null || echo 0)
+      unpushed=0
     fi
   fi
 
@@ -3518,6 +3827,12 @@ PYFIND_WS
 
   printf '\n✓ Pruned %s.\n\n' "$target_dir"
 }
+
+if [[ "${1:-}" == "new" ]]; then
+  shift
+  new_project_subcommand "$@"
+  exit 0
+fi
 
 if [[ "${1:-}" == "plant" ]]; then
   shift
@@ -3657,7 +3972,11 @@ done
 repo_input=${base_override:-${BASE_REPO:-}}
 if [[ -z "$repo_input" ]]; then
   current_repo=$(git rev-parse --show-toplevel 2>/dev/null || true)
-  repo_input=${current_repo:-$HOME/workspace/finance_tool}
+  repo_input=${current_repo:-}
+fi
+if [[ -z "$repo_input" ]]; then
+  printf 'Cannot find a Git repository. Run "sprout new <name>" to create one, or pass --base <path>.\n' >&2
+  exit 1
 fi
 resolved=$(resolve_repository "$repo_input") || {
   printf 'Cannot find a Git repository at base: %s\n' "$repo_input" >&2
@@ -3811,7 +4130,9 @@ PYAUTH
   umask 077
   netrc=$(mktemp)
   response_file=$(mktemp)
-  trap 'rm -f "$netrc" "$response_file"' EXIT
+  WORKTREE_TX_NETRC="$netrc"
+  WORKTREE_TX_RESPFILE="$response_file"
+  trap rollback_worktree_transaction INT TERM HUP EXIT
   printf 'machine api.atlassian.com login %s password %s\n' "$JIRA_EMAIL" "$JIRA_API_TOKEN" > "$netrc"
   if ! http_status=$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
     --netrc-file "$netrc" -H 'Accept: application/json' \
@@ -3927,27 +4248,48 @@ if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
   printf 'Branch already exists: %s\n' "$branch" >&2
   exit 1
 fi
+
+WORKTREE_TX_REPO="$repo"
+WORKTREE_TX_TARGET="$target"
+WORKTREE_TX_BRANCH="$branch"
+trap rollback_worktree_transaction INT TERM HUP EXIT
   base_branch="main"
   if git -C "$repo" show-ref --verify --quiet refs/remotes/origin/master && ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main; then
     base_branch="master"
+  elif ! git -C "$repo" show-ref --verify --quiet refs/remotes/origin/main && git -C "$repo" show-ref --verify --quiet refs/heads/master && ! git -C "$repo" show-ref --verify --quiet refs/heads/main; then
+    base_branch="master"
   fi
 
-  printf '\nFetching latest %s from origin to ensure branch reference is up-to-date...\n' "$base_branch"
-  git -C "$repo" fetch origin "$base_branch" >/dev/null 2>&1 || true
-
-  if ! git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
-    printf 'Missing origin/%s in base repository. Fetch it before creating a worktree.\n' "$base_branch" >&2
-    exit 1
+  has_origin=false
+  if git -C "$repo" remote 2>/dev/null | grep -q "^origin$"; then
+    has_origin=true
   fi
 
-  git -C "$repo" worktree add --track -b "$branch" "$target" "origin/$base_branch"
-  printf '\nCreated worktree: %s\nBranch: %s (tracking origin/%s)\nBase: %s\n' "$target" "$branch" "$base_branch" "$repo"
+  if [[ "$has_origin" == "true" ]]; then
+    printf '\nFetching latest %s from origin to ensure branch reference is up-to-date...\n' "$base_branch"
+    git -C "$repo" fetch origin "$base_branch" >/dev/null 2>&1 || true
+  fi
 
-  # Configure branch to track origin/main with automatic rebase on pull
-  git -C "$target" config branch."$branch".remote origin
-  git -C "$target" config branch."$branch".merge "refs/heads/$base_branch"
-  git -C "$target" config branch."$branch".rebase true
-  git -C "$target" config pull.rebase true
+  if [[ "$has_origin" == "true" ]] && git -C "$repo" show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+    git -C "$repo" worktree add --track -b "$branch" "$target" "origin/$base_branch"
+    printf '\nCreated worktree: %s\nBranch: %s (tracking origin/%s)\nBase: %s\n' "$target" "$branch" "$base_branch" "$repo"
+
+    # Configure branch to track origin/main with automatic rebase on pull
+    git -C "$target" config branch."$branch".remote origin
+    git -C "$target" config branch."$branch".merge "refs/heads/$base_branch"
+    git -C "$target" config branch."$branch".rebase true
+    git -C "$target" config pull.rebase true
+  else
+    local_base="$base_branch"
+    if ! git -C "$repo" show-ref --verify --quiet "refs/heads/$base_branch"; then
+      local_base=$(git -C "$repo" branch --show-current 2>/dev/null || echo "main")
+      if ! git -C "$repo" show-ref --verify --quiet "refs/heads/$local_base"; then
+        local_base="HEAD"
+      fi
+    fi
+    git -C "$repo" worktree add -b "$branch" "$target" "$local_base"
+    printf '\nCreated worktree: %s\nBranch: %s (based on local %s)\nBase: %s\n' "$target" "$branch" "$local_base" "$repo"
+  fi
 
   # `git worktree add` only checks out tracked files, so BMad's gitignored
   # per-user config (e.g. the active initiative pointer in
@@ -4119,6 +4461,7 @@ if [[ "$no_herdr" != "true" ]] && command -v herdr >/dev/null 2>&1; then
     printf '\nCreating Herdr workspace for %s...\n' "$workspace_label"
     ws_create_json=$(herdr workspace create --cwd "$target" --label "$workspace_label" --focus 2>/dev/null) || true
     pane_id=$(jq -r '.result.root_pane.pane_id // empty' <<< "$ws_create_json" 2>/dev/null || true)
+    WORKTREE_TX_HERDR_WS=$(jq -r '.result.workspace.workspace_id // .result.root_pane.workspace_id // empty' <<< "$ws_create_json" 2>/dev/null || true)
     
     if [[ "$no_agent" != "true" && -n "$pane_id" ]]; then
       safe_agent_name=$(printf 'agent-%s' "$workspace_label" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | cut -c1-30)
@@ -4189,3 +4532,5 @@ EOF
 fi
 
 printf '\nTo enter it: cd %q\n' "$target"
+WORKTREE_TX_COMMITTED=true
+trap - INT TERM HUP EXIT

@@ -120,3 +120,18 @@ Sprout follows a strict **zero-secrets-in-repo** philosophy and uses Git's inter
 - Solves **Context Rot** by snapshotting state to `.sprout/handoff.md` (uncommitted diffs, status, recent commits, and task description).
 - Cleanly restarts the bloated agent process inside the existing Herdr pane, restoring full attention and reducing token usage back to baseline (~3k tokens).
 
+### 8. Zero-Git Greenfield Creation (`sprout new`) & Local-First Worktrees
+- **Zero-Git Pre-requisites:** Projects can be bootstrapped from scratch without an existing Git repo or remote GitHub account using `sprout new <name>`.
+- **Local-First Fallback:** Worktree commands (`sprout feat`, `sprout fix`, `sprout sync`, `sprout prune`) do not require a remote `origin/main`. If an `origin` remote has not been configured yet, Sprout cleanly uses the local `main` branch as the base reference without throwing errors.
+- **Optional Jira Integration:** Repositories initialized via `sprout init` treat Jira credentials as strictly optional, enabling free-form prompt and document-driven workflows without requiring Atlassian accounts.
+
+### 9. Transactional Safety & Autonomous Rollback Engine
+- **Atomic Operations:** Task worktree creation (`sprout feat`, `fix`) and project initialization (`sprout new`, `plant`) execute within a transactional boundary.
+- **Autonomous Rollback on Interruption:** If an operation is aborted (`SIGINT` / Ctrl+C), terminated, or encounters an execution failure before completion:
+  - Any allocated Herdr workspace is cleanly closed.
+  - The Git worktree reference is detached and pruned (`git worktree remove --force` + `git worktree prune`).
+  - The created working directory is removed.
+  - The unmerged Git branch is deleted (`git branch -D`).
+  - Temporary authentication/API files are cleaned up.
+- **Zero-Conflict Guarantee:** Retrying a command immediately after an abort never encounters `Destination already exists` or `Branch already exists` errors.
+

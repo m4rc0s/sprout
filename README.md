@@ -33,40 +33,36 @@ cd sprout
 cp bin/sprout ~/.local/bin/sprout
 ```
 
-### 2. Plant the Tree or Initialize an Existing Repo
+### 2. Create a Brand New Project or Plant an Existing Repo
 
-**Option A: Plant from scratch in any clean directory (`sprout plant`)**
-If starting from an arbitrary directory without a pre-existing workspace, use `sprout plant` to clone from a Git repo OR bootstrap a brand new project from a specification document (Markdown/HTML) 100% deterministically with zero LLMs:
+**Option A: Create a brand new project from scratch (`sprout new`)**
+Zero Git pre-requisites. Sprout initializes the clean Git repo, Sprout configuration, initial commit, and optional Herdr workspace:
 ```bash
-# 1. Bootstrap a brand new project from a Markdown product vision or PRD:
-sprout plant vision.md
-sprout plant specs/billing_prd.html ~/workspace/billing_service
+# 1. Empty greenfield project (agent starts in discovery mode):
+sprout new meu_app
 
-# 2. Plant from a remote repository:
+# 2. Plant from an inline idea / prompt:
+sprout new meu_app -p "Task manager in Next.js with auth"
+
+# 3. Plant from a specification document (Markdown/HTML):
+sprout new meu_app -s specs/billing_prd.md
+
+# 4. Only initialize the repository without launching an agent:
+sprout new meu_app --no-agent
+```
+
+**Option B: Plant from a remote repository (`sprout plant`)**
+```bash
+# Clone and plant from a remote Git repository:
 sprout plant git@github.com:my-org/finance_tool.git
 sprout plant https://github.com/my-org/finance_tool.git --branch develop
 
-# 3. Plant into a custom destination directory:
-sprout plant /path/to/existing/repo ~/workspace/finance_tool
-
-# 4. Seed an existing repository with a specification document:
+# Seed an existing remote repository with a specification document:
 sprout plant git@github.com:my-org/finance_tool.git --spec specs/v2.md
-sprout plant --spec vision.md  # inside current repo
-
-# 5. Plant a brand new project from a free-form prompt (no pre-existing dir or repo).
-# The prompt is saved as the spec (.sprout/spec.md) and the agent starts in plan mode.
-sprout plant "task manager in Next.js with login" ~/workspace/my_app
-sprout plant --prompt "payments API in Go" ~/workspace/payments
-
-# 6. Plant an empty project (no spec): greenfield is automatic for new/empty dirs.
-# The agent starts product discovery (bmad-brainstorming / bmad-product-brief);
-# add --no-agent to only initialize the repo.
-sprout plant meu_app
-sprout plant meu_app --no-agent
 ```
 
-**Option B: Initialize inside an existing local repository (`sprout init`)**
-If you already have a canonical base repository cloned:
+**Option C: Initialize inside an existing local repository (`sprout init`)**
+If you already have a canonical base repository cloned on disk:
 ```bash
 cd ~/workspace/my-project
 sprout init
@@ -75,7 +71,7 @@ sprout init
 The interactive wizard configures:
 * **Project metadata:** Project name and GitHub repository (saved under shared Git metadata at `<git-common-dir>/sprout/config.toml`).
 * **Defaults:** Default agent (`claude`, `agy`, `codex`) and workflow method (`bmad`, `scpe`, `none`).
-* **Jira credentials:** Site URL, account email, and API token (saved securely in `~/.sprout/auth.toml` with `chmod 600`).
+* **Jira credentials (optional):** Site URL, account email, and API token (saved securely in `~/.sprout/auth.toml` with `chmod 600`; press Enter to skip if not using Jira).
 
 #### 🔑 Getting Your Jira API Token
 
@@ -269,12 +265,24 @@ sprout feat --issue FT-102 --no-herdr
 sprout chore --feature cleanup_logs --slug prune_old_entries
 ```
 
+### Transactional Creation & Autonomous Rollback
+
+Sprout operations are **strictly transactional**:
+- When creating a task worktree (`sprout feat`, `sprout fix`, etc.) or bootstrapping a project (`sprout new`, `sprout plant`), Sprout maintains an atomic transaction lifecycle.
+- If you cancel the operation (e.g. `Ctrl+C` / `SIGINT`), close the terminal, or encounter an error mid-flight, Sprout's **Rollback Engine** automatically tears down any newly created worktree, deletes the unmerged Git branch, cleans up created directories, and closes the allocated Herdr workspace.
+- **Zero Conflicts on Retry:** You never have to manually run `git branch -D` or `rm -rf` to clear out partially configured tasks before trying again.
+
 ### Command Options Reference
 
 | Option | Short | Description |
 | :--- | :--- | :--- |
+| `sprout new <NAME>` | — | Create a brand new project completely from scratch (zero Git pre-requisites). |
+| `sprout plant [SRC]` | — | Plant base repository from remote Git URL, local path, or specification document. |
+| `sprout init` | — | Interactive initialization inside an existing base repository (Jira optional). |
 | `<type>` | — | Positional Conventional Commit type (`feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). |
 | `[TEXT]` | — | Optional positional free-form task description (bypasses Jira; automatically generates branch slug). |
+| `-p, --prompt <TEXT>`| — | Inline project idea or prompt (used with `sprout new` / `plant`). |
+| `-s, --spec <PATH>` | — | Path to vision, PRD, or spec document (`.md`, `.html`) to bootstrap project from. |
 | `--context <TEXT>`| `-c` | Free-form task context (use `-` to read from stdin). |
 | `--context-file <FILE>`| — | Read task context from a markdown or text file. |
 | `--issue <KEY>` | — | Issue key (e.g. `FT-123`). Fetches details, derives branch slug, and creates `.sprout/issue.json`. |
