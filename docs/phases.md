@@ -72,4 +72,14 @@ This document records the developmental milestones and capabilities introduced a
   - **Warm-Start Session Recycling (`sprout session recycle`):** Snapshots Git diffs, modified files, and task context to `.sprout/handoff.md`, interrupts the bloated agent process in Herdr, and relaunches a fresh session with a pristine context window (~3k tokens) and warm-start prompt.
   - **Session Lifecycle Inspection (`sprout session status`):** Displays active agent, Herdr pane, worktree mapping, and last handoff timestamp.
 
+---
+
+## Phase 7: Zero-Git Project Creation (`sprout new`) & Transactional Lifecycle
+- **Goal:** Provide a clean, intuitive project bootstrapping experience with zero Git pre-requisites and atomic rollback protection against interrupted commands.
+- **Key Capabilities:**
+  - **Zero-Git Greenfield Bootstrapping (`sprout new <name>`):** Initializes a project from scratch with no pre-existing Git repo or GitHub remote, with full support for prompt-driven (`-p`) and spec-driven (`-s`) bootstrapping.
+  - **Local-First Fallback:** Decouples worktree creation from remote GitHub origins: worktrees, syncing, and pruning fall back cleanly to local `main` when `origin` has not been configured.
+  - **Non-blocking `sprout init`:** Makes Jira credentials optional so repositories can be adopted without Atlassian accounts.
+  - **Transactional Lifecycle & Autonomous Rollback:** Both worktree creation (`sprout feat`, `fix`) and project initialization (`sprout new`, `plant`) maintain atomic transactions. On `SIGINT` (Ctrl+C), script error, or abort, Sprout automatically cleans up directories, unmerged branches, worktree references, and Herdr workspaces to eliminate retrying conflicts.
+
 

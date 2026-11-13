@@ -80,12 +80,12 @@ Sprout follows a strict **zero-secrets-in-repo** philosophy and uses Git's inter
 
 ## Architectural Layers
 
-### 1. Tracker & Auth Layer
-- Communicates with Jira Cloud using Atlassian API Gateway (`https://api.atlassian.com/ex/jira/<cloudId>`) and scoped tokens.
-- Discovers the tenant Cloud ID via `/_edge/tenant_info`.
-- Resolves issue details (`summary`, `description`, `issuetype`, `status`, `priority`, `assignee`).
-- Converts all ticket data into the tracker-neutral `.sprout/` contract below, so other providers (Linear, GitHub Issues) can plug in without changing downstream consumers.
-- Decouples credentials (`~/.sprout/auth.toml`, chmod 600) from source repositories (with backward compatibility fallback to `~/.jdw/auth.toml`).
+### 1. Ingestion, Tracker & Auth Layer
+- **Jira Cloud:** Communicates with Jira Cloud using Atlassian API Gateway (`https://api.atlassian.com/ex/jira/<cloudId>`) and scoped tokens. Discovers tenant Cloud ID via `/_edge/tenant_info` and converts Jira ADF into clean plain-text/markdown.
+- **Web & Document Links:** Ingests remote URLs (HTML articles, specs, or raw Markdown) via `curl -sL --fail` and a zero-dependency Python `HTMLParser`, extracting deterministic title, slug, and clean Markdown body while preserving code blocks and links.
+- **Free-form Text:** Supports direct command-line prompts and piped stdin (`-c -`), automatically deriving slug and complexity signals.
+- **Contract Normalization:** Converts all sources into the tracker-neutral `.sprout/` contract below (`source: "jira" | "url" | "manual"`), so agents and methodologies consume uniform payloads.
+- **Credentials Security:** Decouples credentials (`~/.sprout/auth.toml`, chmod 600) from source repositories (with backward compatibility fallback to `~/.jdw/auth.toml`).
 
 ### 2. Git Worktree Layer
 - Auto-detects the canonical repository even when executed from an existing worktree (via `--git-common-dir`).
@@ -119,4 +119,25 @@ Sprout follows a strict **zero-secrets-in-repo** philosophy and uses Git's inter
 ### 7. Session Lifecycle & Context Compaction (`sprout session recycle`)
 - Solves **Context Rot** by snapshotting state to `.sprout/handoff.md` (uncommitted diffs, status, recent commits, and task description).
 - Cleanly restarts the bloated agent process inside the existing Herdr pane, restoring full attention and reducing token usage back to baseline (~3k tokens).
+
+### 8. Zero-Git Greenfield Creation (`sprout new`) & Local-First Worktrees
+- **Zero-Git Pre-requisites:** Projects can be bootstrapped from scratch without an existing Git repo or remote GitHub account using `sprout new <name>`.
+- **Local-First Fallback:** Worktree commands (`sprout feat`, `sprout fix`, `sprout sync`, `sprout prune`) do not require a remote `origin/main`. If an `origin` remote has not been configured yet, Sprout cleanly uses the local `main` branch as the base reference without throwing errors.
+- **Optional Jira Integration:** Repositories initialized via `sprout init` treat Jira credentials as strictly optional, enabling free-form prompt and document-driven workflows without requiring Atlassian accounts.
+
+### 9. Transactional Safety & Autonomous Rollback Engine
+- **Atomic Operations:** Task worktree creation (`sprout feat`, `fix`) and project initialization (`sprout new`, `plant`) execute within a transactional boundary.
+- **Autonomous Rollback on Interruption:** If an operation is aborted (`SIGINT` / Ctrl+C), terminated, or encounters an execution failure before completion:
+  - Any allocated Herdr workspace is cleanly closed.
+  - The Git worktree reference is detached and pruned (`git worktree remove --force` + `git worktree prune`).
+  - The created working directory is removed.
+  - The unmerged Git branch is deleted (`git branch -D`).
+  - Temporary authentication/API files are cleaned up.
+- **Zero-Conflict Guarantee:** Retrying a command immediately after an abort never encounters `Destination already exists` or `Branch already exists` errors.
+
+### 10. Dedicated Code Review Worktrees (`sprout review`)
+- **Zero-Flag Automatic Checkout:** When invoked with a PR number, URL, or branch (`sprout review <PR>`), Sprout automatically fetches the PR ref (`refs/pull/<number>/head`), creates an isolated review branch (`review/pr-<number>`), and checks out the code into a dedicated worktree (`review_pr_<number>`).
+- **State Resume:** If the review worktree already exists, Sprout automatically resumes it, fetches incremental updates from GitHub, refreshes the review dossier, and focuses the Herdr workspace.
+- **Full Dossier Normalization:** Generates `.sprout/review.md`, `.sprout/review.json`, and `.sprout/issue.json`, enabling agents to audit the PR diff or triage review feedback.
+- **Unified Teardown:** Integrates directly with `sprout prune` for one-command teardown of the review worktree, Herdr workspace, and local review branch.
 
