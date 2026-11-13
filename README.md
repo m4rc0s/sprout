@@ -51,6 +51,18 @@ sprout new meu_app -s specs/billing_prd.md
 sprout new meu_app --no-agent
 ```
 
+#### 💡 When to Use `-p` vs `-s` vs Discovery (and When NOT to Use `-p`)
+
+The `-p, --prompt` flag is specifically for **project initialization and planting** (`sprout new` and `sprout plant`). It primes the agent with an inline vision string saved to `.sprout/spec.md`.
+
+* **Use `-p, --prompt "..."`**: When creating a greenfield project with a quick one-line idea (`sprout new app -p "Payment gateway in Next.js"`).
+* **Use `-s, --spec <PATH_OR_URL>`**: When you already have a structured PRD/spec document (`sprout new app -s specs/prd.md`).
+* **Use neither (`sprout new app`)**: When you want interactive requirements discovery — Sprout launches the BMad Discovery interview (`bmad-brainstorming` / `bmad-product-brief`).
+* **Do NOT use `-p` for daily tasks in existing repos**: Use positional text (`sprout feat "Adicionar exportação CSV"`), Jira issues (`--issue FT-123`), or links (`--link URL`).
+
+> [!TIP]
+> For the complete decision tree, stdin pipes, and advanced workflows, see the **[Creation & Ingestion Guide](docs/creation-guide.md)**.
+
 **Option B: Plant from a remote repository (`sprout plant`)**
 ```bash
 # Clone and plant from a remote Git repository:
@@ -359,6 +371,7 @@ Sprout is built around pluggable issue trackers (Jira today; Linear/GitHub Issue
 
 ## Documentation
 
+* **[Creation & Ingestion Guide](docs/creation-guide.md)**: Deep dive into all ways to bootstrap projects, create worktrees, pipe stdin, ingest articles, and when to use `-p` vs `-s`.
 * **[Architecture Guide](docs/architecture.md)**: Deep dive into the 3-tier design, configuration/secrets model, data flows, and extensibility.
 * **[Workflows & Methodologies](docs/workflows.md)**: Details on configuring agents, prompt templates, and project defaults.
 * **[Autopilot](docs/autopilot.md)**: Event-driven, zero-LLM reactions to PR events.
