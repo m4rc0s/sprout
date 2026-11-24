@@ -1020,10 +1020,12 @@ def find_agent_for_worktree(target_root, pane_ovr="", agent_ovr=""):
                 return ag
             if agent_ovr and (ag.get("name") == agent_ovr or ag.get("agent") == agent_ovr):
                 return ag
-            ag_cwd = Path(ag.get("cwd", "")).resolve()
-            fg_cwd = Path(ag.get("foreground_cwd", "")).resolve()
-            if ag_cwd == target_root or fg_cwd == target_root:
-                return ag
+            # Path("").resolve() returns the process cwd, so a missing field
+            # would match any worktree. Require a non-empty value.
+            for key in ("cwd", "foreground_cwd"):
+                raw = ag.get(key) or ""
+                if raw and Path(raw).resolve() == target_root:
+                    return ag
     except Exception:
         pass
     return None
@@ -1036,10 +1038,10 @@ def find_pane_for_worktree(target_root, pane_ovr=""):
         for p in panes:
             if pane_ovr and p.get("pane_id") == pane_ovr:
                 return p
-            p_cwd = Path(p.get("cwd", "")).resolve()
-            fg_cwd = Path(p.get("foreground_cwd", "")).resolve()
-            if p_cwd == target_root or fg_cwd == target_root:
-                return p
+            for key in ("cwd", "foreground_cwd"):
+                raw = p.get(key) or ""
+                if raw and Path(raw).resolve() == target_root:
+                    return p
     except Exception:
         pass
     return None
