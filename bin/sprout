@@ -98,7 +98,7 @@ Examples:
 
   # Plant a brand new project from a specification document:
   sprout plant vision.md
-  sprout plant specs/prd.html ~/workspace/meu_app
+  sprout plant specs/prd.html ~/workspace/product/meu_app
 
   # Plant from a remote repository:
   sprout plant git@github.com:m4rc0s/sprout.git
@@ -2067,7 +2067,7 @@ manage_agent_subcommand() {
   fi
   resolved=$(resolve_repository "$cur_repo" 2>/dev/null || true)
   if [[ -z "$resolved" ]]; then
-    resolved=$(resolve_repository "${BASE_REPO:-$HOME/workspace/finance_tool}" 2>/dev/null || true)
+    resolved=$(resolve_repository "${BASE_REPO:-$HOME/workspace/product/finance_tool}" 2>/dev/null || true)
   fi
   if [[ -z "$resolved" ]]; then
     printf 'Error: sprout agent must be run inside or alongside a Git repository.\n' >&2
@@ -2348,7 +2348,7 @@ Examples:
   sprout review feat/auth-tokens
 
   # With custom review branch or directory:
-  sprout review 58 --branch review/auth-audit --dest ~/workspace/auth_audit
+  sprout review 58 --branch review/auth-audit --dest ~/workspace/product/auth_audit
 
   # Inside an active worktree, refresh feedback for current branch:
   sprout review
@@ -2455,7 +2455,7 @@ PYMETA
     fi
   elif [[ -n "$pr_repo" ]]; then
     local repo_short=${pr_repo#*/}
-    for cand in "$HOME/workspace/$repo_short" "$PWD/$repo_short" "$PWD/../$repo_short"; do
+    for cand in "$HOME/workspace/product/$repo_short" "$PWD/$repo_short" "$PWD/../$repo_short"; do
       if [[ -d "$cand/.git" ]]; then
         base_repo=$(cd "$cand" && pwd -P)
         break
@@ -3288,11 +3288,11 @@ Options:
 Examples:
   # Plant a brand new project from a Markdown specification:
   sprout plant vision.md
-  sprout plant specs/prd.html ~/workspace/meu_app
+  sprout plant specs/prd.html ~/workspace/product/meu_app
 
   # Plant a brand new project from a prompt (no pre-existing dir or repo):
-  sprout plant "app de tarefas em Next.js com login" ~/workspace/meu_app
-  sprout plant --prompt "API de pagamentos em Go" ~/workspace/pagamentos
+  sprout plant "app de tarefas em Next.js com login" ~/workspace/product/meu_app
+  sprout plant --prompt "API de pagamentos em Go" ~/workspace/product/pagamentos
 
   # Plant an empty project (no spec):
   sprout plant meu_app
