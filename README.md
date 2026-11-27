@@ -33,40 +33,48 @@ cd sprout
 cp bin/sprout ~/.local/bin/sprout
 ```
 
-### 2. Plant the Tree or Initialize an Existing Repo
+### 2. Create a Brand New Project or Plant an Existing Repo
 
-**Option A: Plant from scratch in any clean directory (`sprout plant`)**
-If starting from an arbitrary directory without a pre-existing workspace, use `sprout plant` to clone from a Git repo OR bootstrap a brand new project from a specification document (Markdown/HTML) 100% deterministically with zero LLMs:
+**Option A: Create a brand new project from scratch (`sprout new`)**
+Zero Git pre-requisites. Sprout initializes the clean Git repo, Sprout configuration, initial commit, and optional Herdr workspace:
 ```bash
-# 1. Bootstrap a brand new project from a Markdown product vision or PRD:
-sprout plant vision.md
-sprout plant specs/billing_prd.html ~/workspace/billing_service
+# 1. Empty greenfield project (agent starts in discovery mode):
+sprout new meu_app
 
-# 2. Plant from a remote repository:
+# 2. Plant from an inline idea / prompt:
+sprout new meu_app -p "Task manager in Next.js with auth"
+
+# 3. Plant from a specification document (Markdown/HTML):
+sprout new meu_app -s specs/billing_prd.md
+
+# 4. Only initialize the repository without launching an agent:
+sprout new meu_app --no-agent
+```
+
+#### 💡 When to Use `-p` vs `-s` vs Discovery (and When NOT to Use `-p`)
+
+The `-p, --prompt` flag is specifically for **project initialization and planting** (`sprout new` and `sprout plant`). It primes the agent with an inline vision string saved to `.sprout/spec.md`.
+
+* **Use `-p, --prompt "..."`**: When creating a greenfield project with a quick one-line idea (`sprout new app -p "Payment gateway in Next.js"`).
+* **Use `-s, --spec <PATH_OR_URL>`**: When you already have a structured PRD/spec document (`sprout new app -s specs/prd.md`).
+* **Use neither (`sprout new app`)**: When you want interactive requirements discovery — Sprout launches the BMad Discovery interview (`bmad-brainstorming` / `bmad-product-brief`).
+* **Do NOT use `-p` for daily tasks in existing repos**: Use positional text (`sprout feat "Adicionar exportação CSV"`), Jira issues (`--issue FT-123`), or links (`--link URL`).
+
+> [!TIP]
+> For the complete decision tree, stdin pipes, and advanced workflows, see the **[Creation & Ingestion Guide](docs/creation-guide.md)**.
+
+**Option B: Plant from a remote repository (`sprout plant`)**
+```bash
+# Clone and plant from a remote Git repository:
 sprout plant git@github.com:my-org/finance_tool.git
 sprout plant https://github.com/my-org/finance_tool.git --branch develop
 
-# 3. Plant into a custom destination directory:
-sprout plant /path/to/existing/repo ~/workspace/finance_tool
-
-# 4. Seed an existing repository with a specification document:
+# Seed an existing remote repository with a specification document:
 sprout plant git@github.com:my-org/finance_tool.git --spec specs/v2.md
-sprout plant --spec vision.md  # inside current repo
-
-# 5. Plant a brand new project from a free-form prompt (no pre-existing dir or repo).
-# The prompt is saved as the spec (.sprout/spec.md) and the agent starts in plan mode.
-sprout plant "task manager in Next.js with login" ~/workspace/my_app
-sprout plant --prompt "payments API in Go" ~/workspace/payments
-
-# 6. Plant an empty project (no spec): greenfield is automatic for new/empty dirs.
-# The agent starts product discovery (bmad-brainstorming / bmad-product-brief);
-# add --no-agent to only initialize the repo.
-sprout plant meu_app
-sprout plant meu_app --no-agent
 ```
 
-**Option B: Initialize inside an existing local repository (`sprout init`)**
-If you already have a canonical base repository cloned:
+**Option C: Initialize inside an existing local repository (`sprout init`)**
+If you already have a canonical base repository cloned on disk:
 ```bash
 cd ~/workspace/my-project
 sprout init
@@ -75,7 +83,7 @@ sprout init
 The interactive wizard configures:
 * **Project metadata:** Project name and GitHub repository (saved under shared Git metadata at `<git-common-dir>/sprout/config.toml`).
 * **Defaults:** Default agent (`claude`, `agy`, `codex`) and workflow method (`bmad`, `scpe`, `none`).
-* **Jira credentials:** Site URL, account email, and API token (saved securely in `~/.sprout/auth.toml` with `chmod 600`).
+* **Jira credentials (optional):** Site URL, account email, and API token (saved securely in `~/.sprout/auth.toml` with `chmod 600`; press Enter to skip if not using Jira).
 
 #### 🔑 Getting Your Jira API Token
 
@@ -158,31 +166,37 @@ sprout session watch --stop
 
 The **Sentinel Watcher** (`sprout session watch --daemon`) monitors file size on disk (`transcript.jsonl`) and scrollback lines without consuming any LLM tokens. When sessions exceed the threshold (1500KB), it automatically triggers the handoff cycle while you focus on other work.
 
-### Pull Request Code Review Triage (`sprout check-review`)
+### Pull Request Code Review & Dedicated Review Worktrees (`sprout review`)
 
-Once code is pushed and a pull request is created on GitHub, reviewers leave top-level summaries, discussion comments, and line-by-line diff annotations. Sprout closes the development feedback loop with `sprout check-review` (alias: `sprout review`):
+Sprout allows reviewing any pull request directly in an isolated review worktree with automatic checkout:
 
 ```bash
-# Inside an active worktree: automatically resolves current branch and its open PR
-sprout check-review
+# Check out a PR into a dedicated review worktree and branch (e.g. ../review_pr_58 on review/pr-58)
+sprout review 58
 
-# Target a specific PR by number or GitHub URL from anywhere:
-sprout check-review 58
-sprout check-review https://github.com/my-org/finance_tool/pull/58
+# Pass full GitHub PR URL or head branch name:
+sprout review https://github.com/my-org/finance_tool/pull/58
+sprout review feat/auth-tokens
+
+# Override the local review branch or directory name:
+sprout review 58 --branch review/auth-audit --dest ~/workspace/auth_audit
+
+# Inside an active worktree: refreshes review feedback in-place for the current branch:
+sprout review
 
 # Optional: clean context before review triage
-sprout check-review --recycle
+sprout review --recycle
 ```
 
-**What it does (100% Deterministic, Zero Duplicate Workspaces):**
-1. **GitHub CLI Ingestion (`gh`):** Fetches PR metadata, review verdicts (`CHANGES_REQUESTED`, `APPROVED`), general discussion comments, and inline code comments (`path`, `line`, `diff_hunk`).
-2. **Review Dossier:** Consolidates all feedback into `.sprout/review.md` and `.sprout/review.json` grouped cleanly by file and line number.
-3. **Herdr Workspace & Auto-Spawn Re-use:** Locates the existing Herdr workspace and pane for that worktree, focusing it rather than spawning duplicate windows. If the agent session had ended or was closed, it automatically auto-spawns a fresh agent into the pane using `.sprout/session.json`.
-4. **BMad Review Triage Kickoff:** Automatically submits the BMad Review Triage prompt instructing the agent to act as a senior technical lead:
-   - 🔴 **[Must Fix / Bloqueante]**: Critical fixes required for immediate PR approval.
-   - 🟡 **[Opcional / Sugestão Rápida]**: Low-effort cosmetic or readability suggestions.
-   - 🔵 **[Fora de Escopo / Split]**: Out-of-scope feature requests or large architectural expansions (*scope creep*) that should be split into new backlog issues.
-   - 📋 **Resolution Plan**: Generates an ordered fix plan for developer approval before applying code changes.
+**Automatic Checkout & Resume By Design:**
+1. **Zero-Flag Dedicated Worktree:** Whenever called with a PR argument (`sprout review <PR>`), Sprout automatically creates a dedicated worktree and review branch (`review/pr-<number>`) and checks out the PR code without requiring any extra checkout flags.
+2. **Intelligent Resume (Retomar):** If the review worktree already exists, Sprout automatically resumes it, fetches the latest commits from GitHub (`refs/pull/<number>/head`), refreshes the review dossier, and re-focuses the Herdr workspace.
+3. **GitHub CLI Ingestion (`gh`):** Fetches PR metadata, review verdicts (`CHANGES_REQUESTED`, `APPROVED`), general discussion comments, and inline code comments (`path`, `line`, `diff_hunk`).
+4. **Review Dossier:** Consolidates all feedback into `.sprout/review.md` and `.sprout/review.json` grouped cleanly by file and line number.
+5. **Herdr Workspace & Auto-Spawn:** Opens or focuses the Herdr workspace (`review-pr-<number>`) and starts the agent in plan mode:
+   - If review comments exist: runs **BMad Review Triage** to classify feedback into Must Fix, Optional, and Out of Scope.
+   - If 0 review comments: prompts the agent to perform an architectural diff audit comparing against the base branch.
+6. **Clean Teardown:** Once review is done, running `sprout prune` inside the review worktree removes the worktree, closes the Herdr workspace, and deletes the local `review/pr-<number>` branch in a single command.
 
 
 ### Autopilot: workflows that start on their own (`sprout autopilot`)
@@ -214,22 +228,51 @@ sprout prune --keep-remote
 
 # Discard uncommitted or unpushed work instead of being blocked
 sprout prune --force
+
+# Simulate without deleting anything (dry-run)
+sprout prune --dry-run
 ```
 
 **What it does:**
-1. Refuses to run on the base repository checkout, and refuses to proceed if the worktree has uncommitted changes or commits that were never pushed — unless `--force` is passed.
-2. Locates the Herdr workspace backing the worktree (by matching pane/agent `cwd`) and closes it.
-3. Removes the Git worktree (`git worktree remove`) and prunes stale worktree metadata.
-4. Deletes the local branch and, if it exists on `origin`, the remote branch too.
+1. Identifies the target worktree and prominently displays its metadata (path, target name, local branch, base repository, Herdr workspace) and planned actions.
+2. Refuses to run on the base repository checkout directly, listing all active worktrees available to prune.
+3. Refuses to proceed if the worktree has uncommitted changes or unpushed commits — unless `--force` is passed.
+4. Locates the Herdr workspace backing the worktree (by matching pane/agent `cwd`) and closes it.
+5. Removes the Git worktree (`git worktree remove`) and prunes stale worktree metadata.
+6. Deletes the local branch and, if it exists on `origin`, the remote branch too.
 
 | Option | Description |
 | :--- | :--- |
 | `TARGET` | Worktree path, feature/directory name, or branch to prune (defaults to the current worktree). |
 | `-y, --yes` | Skip the confirmation prompt. |
+| `-n, --dry-run` | Simulate the prune and display targeted worktree, branch, and actions without removing anything. |
 | `--force` | Remove the worktree despite uncommitted/unpushed changes, and force-delete the branch. |
 | `--keep-branch` | Do not delete the local Git branch. |
 | `--keep-remote` | Do not delete the matching branch on `origin`. |
 | `--no-herdr` | Do not close the associated Herdr workspace. |
+
+### Worktree Creation from Web Links & Articles
+
+Sprout can ingest remote documentation pages, architecture articles, or specifications directly to create a worktree in an existing repository:
+
+```bash
+# Ingest an article or documentation URL directly as positional argument
+sprout feat https://eng.uber.com/circuit-breaking-architecture/
+
+# Custom summary with explicit --link flag
+sprout feat "Implementar Circuit Breaker" --link https://martinfowler.com/articles/.../circuit-breaker.html
+
+# Read task context from a remote URL via --context-file
+sprout fix --context-file https://raw.githubusercontent.com/org/repo/main/docs/cache-bug.md
+```
+
+**How it works:**
+1. **Intelligent Ingestion:** Sprout fetches the remote page (`curl -sL`), detects whether it is HTML or Markdown, and extracts the title, metadata, and clean Markdown body using a zero-dependency HTML parser.
+2. **Deterministic Slug & Branch:** Automatically derives branch and feature names (e.g., `feat/circuit_breaking_architecture`).
+3. **Complexity & Agent Routing:** Passes the full extracted article content through the Semantic Complexity Engine to score complexity and select the calibrated model tier and reasoning effort.
+4. **Normalized Context:** Saves structured `.sprout/issue.json` (`source: "url"`, `url: "<URL>"`) and `.sprout/issue.md` containing the article markdown.
+5. **Autonomous Plan Mode:** Launches the agent (BMad / SCPE) in Herdr with the article pre-loaded in plan mode.
+6. **Atomic Rollback Guarantee:** If the URL returns a 404, network error, or user aborts, Sprout rolls back all state cleanly without leaving dirty branches or directories.
 
 ### Worktree Creation
 
@@ -237,12 +280,16 @@ sprout prune --force
 # Free-form text workflow (bypasses Jira; automatically derives branch slug & scores complexity)
 sprout feat "Adicionar exportação CSV no relatório de vendas"
 
+# Create worktree directly from an article URL
+sprout feat https://eng.uber.com/circuit-breaking-architecture/
+
 # Bug fix with urgent keyword -> automatically scores Frontier tier and High reasoning effort
 sprout fix "Deadlock no pool de conexões do postgres" --agent agy
 
-# Provide free-form context via flag or file
+# Provide free-form context via flag or file / remote URL
 sprout feat -c "Refatorar camada de autenticação para JWT stateless"
 sprout feat --context-file specs/auth.md
+sprout feat "Implementar Circuit Breaker" --link https://martinfowler.com/articles/.../circuit-breaker.html
 
 # Jira-backed workflow (fetches summary, description, and metadata from Jira Cloud)
 sprout fix --issue FT-123
@@ -269,14 +316,28 @@ sprout feat --issue FT-102 --no-herdr
 sprout chore --feature cleanup_logs --slug prune_old_entries
 ```
 
+### Transactional Creation & Autonomous Rollback
+
+Sprout operations are **strictly transactional**:
+- When creating a task worktree (`sprout feat`, `sprout fix`, etc.) or bootstrapping a project (`sprout new`, `sprout plant`), Sprout maintains an atomic transaction lifecycle.
+- If you cancel the operation (e.g. `Ctrl+C` / `SIGINT`), close the terminal, or encounter an error mid-flight, Sprout's **Rollback Engine** automatically tears down any newly created worktree, deletes the unmerged Git branch, cleans up created directories, and closes the allocated Herdr workspace.
+- **Zero Conflicts on Retry:** You never have to manually run `git branch -D` or `rm -rf` to clear out partially configured tasks before trying again.
+
 ### Command Options Reference
 
 | Option | Short | Description |
 | :--- | :--- | :--- |
+| `sprout new <NAME>` | — | Create a brand new project completely from scratch (zero Git pre-requisites). |
+| `sprout plant [SRC]` | — | Plant base repository from remote Git URL, local path, or specification document. |
+| `sprout init` | — | Interactive initialization inside an existing base repository (Jira optional). |
 | `<type>` | — | Positional Conventional Commit type (`feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`). |
 | `[TEXT]` | — | Optional positional free-form task description (bypasses Jira; automatically generates branch slug). |
+| `[URL]` | — | Optional positional URL to an article, spec, or doc to ingest as task context. |
+| `--link <URL>` | — | URL to an article, architecture doc, or spec to ingest directly as task context. |
+| `-p, --prompt <TEXT>`| — | Inline project idea or prompt (used with `sprout new` / `plant`). |
+| `-s, --spec <PATH_OR_URL>` | — | Path or URL to vision, PRD, or spec document (`.md`, `.html`) to bootstrap project from. |
 | `--context <TEXT>`| `-c` | Free-form task context (use `-` to read from stdin). |
-| `--context-file <FILE>`| — | Read task context from a markdown or text file. |
+| `--context-file <FILE_OR_URL>`| — | Read task context from a markdown/text file or remote URL. |
 | `--issue <KEY>` | — | Issue key (e.g. `FT-123`). Fetches details, derives branch slug, and creates `.sprout/issue.json`. |
 | `--agent <NAME>` | `-a` | Agent runtime to start in Herdr (`auto`, `claude`, `agy`, `codex`, `gemini`). Default: `auto` (Smart Router). |
 | `--model <MODEL>`| — | Explicit model override (e.g. `opus`, `sonnet`, `gemini-4-argon`, `gemini-3.8-flash`, `gpt-6-luna`). Defaults to task-type tiering. |
@@ -310,6 +371,7 @@ Sprout is built around pluggable issue trackers (Jira today; Linear/GitHub Issue
 
 ## Documentation
 
+* **[Creation & Ingestion Guide](docs/creation-guide.md)**: Deep dive into all ways to bootstrap projects, create worktrees, pipe stdin, ingest articles, and when to use `-p` vs `-s`.
 * **[Architecture Guide](docs/architecture.md)**: Deep dive into the 3-tier design, configuration/secrets model, data flows, and extensibility.
 * **[Workflows & Methodologies](docs/workflows.md)**: Details on configuring agents, prompt templates, and project defaults.
 * **[Autopilot](docs/autopilot.md)**: Event-driven, zero-LLM reactions to PR events.
